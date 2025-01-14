@@ -15,206 +15,31 @@ package destroy
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
+	"errors"
 	"testing"
 
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/okteto/okteto/pkg/cmd/build"
-	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/build/buildkit"
+	"github.com/okteto/okteto/pkg/deployable"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
-	filesystem "github.com/okteto/okteto/pkg/filesystem/fake"
+	"github.com/okteto/okteto/pkg/externalresource"
+	fakefs "github.com/okteto/okteto/pkg/filesystem/fake"
 	"github.com/okteto/okteto/pkg/model"
-	"github.com/okteto/okteto/pkg/registry"
-	"github.com/okteto/okteto/pkg/types"
-	"github.com/spf13/afero"
+	"github.com/okteto/okteto/pkg/remote"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-type fakeBuilder struct {
-	err           error
-	assertOptions func(o *types.BuildOptions)
+type fakeRemoteRunner struct {
+	mock.Mock
 }
 
-func (f fakeBuilder) Build(_ context.Context, opts *types.BuildOptions) error {
-	if f.assertOptions != nil {
-		f.assertOptions(opts)
-	}
-	return f.err
+func (f *fakeRemoteRunner) Run(ctx context.Context, params *remote.Params) error {
+	args := f.Called(ctx, params)
+	return args.Error(0)
 }
 
-func (fakeBuilder) IsV1() bool { return true }
-
-type fakeRegistry struct {
-	registry          map[string]fakeImage
-	errAddImageByName error
-	errAddImageByOpts error
-}
-
-// fakeImage represents the data from an image
-type fakeImage struct {
-	Registry string
-	Repo     string
-	Tag      string
-	ImageRef string
-	Args     []string
-}
-
-func newFakeRegistry() fakeRegistry {
-	return fakeRegistry{
-		registry: map[string]fakeImage{},
-	}
-}
-
-func (fr fakeRegistry) HasGlobalPushAccess() (bool, error) { return false, nil }
-
-func (fr fakeRegistry) GetImageTagWithDigest(imageTag string) (string, error) {
-	if _, ok := fr.registry[imageTag]; !ok {
-		return "", oktetoErrors.ErrNotFound
-	}
-	return imageTag, nil
-}
-func (fr fakeRegistry) IsOktetoRegistry(_ string) bool { return false }
-
-func (fr fakeRegistry) AddImageByName(images ...string) error {
-	if fr.errAddImageByName != nil {
-		return fr.errAddImageByName
-	}
-	for _, image := range images {
-		fr.registry[image] = fakeImage{}
-	}
-	return nil
-}
-func (fr fakeRegistry) AddImageByOpts(opts *types.BuildOptions) error {
-	if fr.errAddImageByOpts != nil {
-		return fr.errAddImageByOpts
-	}
-	fr.registry[opts.Tag] = fakeImage{Args: opts.BuildArgs}
-	return nil
-}
-
-func (fr fakeRegistry) GetImageReference(image string) (registry.OktetoImageReference, error) {
-	ref, err := name.ParseReference(image)
-	if err != nil {
-		return registry.OktetoImageReference{}, err
-	}
-	return registry.OktetoImageReference{
-		Registry: ref.Context().RegistryStr(),
-		Repo:     ref.Context().RepositoryStr(),
-		Tag:      ref.Identifier(),
-		Image:    image,
-	}, nil
-}
-
-func (fr fakeRegistry) IsGlobalRegistry(image string) bool { return false }
-
-func (fr fakeRegistry) GetRegistryAndRepo(image string) (string, string) { return "", "" }
-func (fr fakeRegistry) GetRepoNameAndTag(repo string) (string, string)   { return "", "" }
-
-func TestRemoteTest(t *testing.T) {
-	ctx := context.Background()
-	wdCtrl := filesystem.NewFakeWorkingDirectoryCtrl(filepath.Clean("/"))
-	fs := afero.NewMemMapFs()
-	tempCreator := filesystem.NewTemporalDirectoryCtrl(fs)
-
-	type config struct {
-		wd            filesystem.FakeWorkingDirectoryCtrlErrors
-		tempFsCreator error
-		options       *Options
-		builderErr    error
-	}
-	var tests = []struct {
-		name     string
-		config   config
-		expected error
-	}{
-		{
-			name: "OS can't access to the working directory",
-			config: config{
-				wd: filesystem.FakeWorkingDirectoryCtrlErrors{
-					Getter: assert.AnError,
-				},
-				options: &Options{},
-			},
-			expected: assert.AnError,
-		},
-		{
-			name: "OS can't create temporal directory",
-			config: config{
-				options:       &Options{},
-				tempFsCreator: assert.AnError,
-			},
-			expected: assert.AnError,
-		},
-		{
-			name: "OS can't change to the previous working directory",
-			config: config{
-				wd: filesystem.FakeWorkingDirectoryCtrlErrors{
-					Setter: assert.AnError,
-				},
-				options: &Options{},
-			},
-			expected: assert.AnError,
-		},
-		{
-			name: "build incorrect",
-			config: config{
-				options:    &Options{},
-				builderErr: assert.AnError,
-			},
-			expected: oktetoErrors.UserError{
-				E: fmt.Errorf("error during destroy of the development environment: %w", assert.AnError),
-			},
-		},
-		{
-			name: "build with command error",
-			config: config{
-				options: &Options{},
-				builderErr: build.OktetoCommandErr{
-					Stage: "test",
-					Err:   assert.AnError,
-				},
-			},
-			expected: oktetoErrors.UserError{
-				E: fmt.Errorf("error during development environment deployment: %w", assert.AnError),
-			},
-		},
-		{
-			name: "everything correct",
-			config: config{
-				options: &Options{},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			wdCtrl.SetErrors(tt.config.wd)
-			tempCreator.SetError(tt.config.tempFsCreator)
-			rdc := remoteDestroyCommand{
-				builder:              fakeBuilder{err: tt.config.builderErr},
-				fs:                   fs,
-				workingDirectoryCtrl: wdCtrl,
-				temporalCtrl:         tempCreator,
-				destroyImage:         "",
-				registry:             newFakeRegistry(),
-				clusterMetadata: func(ctx context.Context) (*types.ClusterMetadata, error) {
-					return &types.ClusterMetadata{
-						Certificate: []byte("cert"),
-						ServerName:  "1.2.3.4:443",
-					}, nil
-				},
-			}
-			err := rdc.destroy(ctx, tt.config.options)
-			assert.Equal(t, tt.expected, err)
-		})
-	}
-}
-
-func TestGetDestroyFlags(t *testing.T) {
+func TestGetCommandFlags(t *testing.T) {
 	type config struct {
 		opts *Options
 	}
@@ -223,12 +48,6 @@ func TestGetDestroyFlags(t *testing.T) {
 		config   config
 		expected []string
 	}{
-		{
-			name: "no extra options",
-			config: config{
-				opts: &Options{},
-			},
-		},
 		{
 			name: "name set",
 			config: config{
@@ -248,220 +67,249 @@ func TestGetDestroyFlags(t *testing.T) {
 			expected: []string{"--name \"this is a test\""},
 		},
 		{
-			name: "namespace set",
-			config: config{
-				opts: &Options{
-					Namespace: "test",
-				},
-			},
-			expected: []string{"--namespace test"},
-		},
-		{
-			name: "manifest path set",
-			config: config{
-				opts: &Options{
-					ManifestPathFlag: "/hello/this/is/a/test",
-				},
-			},
-			expected: []string{"--file /hello/this/is/a/test"},
-		},
-		{
-			name: "destroy volumes set",
-			config: config{
-				opts: &Options{
-					DestroyVolumes: true,
-				},
-			},
-			expected: []string{"--volumes"},
-		},
-		{
 			name: "force destroy set",
 			config: config{
 				opts: &Options{
+					Name:         "test",
 					ForceDestroy: true,
 				},
 			},
-			expected: []string{"--force-destroy"},
+			expected: []string{"--name \"test\"", "--force-destroy"},
 		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			flags := getDestroyFlags(tt.config.opts)
-			assert.Equal(t, tt.expected, flags)
-		})
-	}
-}
-
-func TestCreateDockerfile(t *testing.T) {
-	wdCtrl := filesystem.NewFakeWorkingDirectoryCtrl(filepath.Clean("/"))
-	fs := afero.NewMemMapFs()
-	type config struct {
-		wd   filesystem.FakeWorkingDirectoryCtrlErrors
-		opts *Options
-	}
-	type expected struct {
-		dockerfileName string
-		err            error
-	}
-	var tests = []struct {
-		name     string
-		config   config
-		expected expected
-	}{
 		{
-			name: "OS can't access working directory",
+			name: "variables set",
 			config: config{
-				wd: filesystem.FakeWorkingDirectoryCtrlErrors{
-					Getter: assert.AnError,
+				opts: &Options{
+					Name: "test",
+					Variables: []string{
+						"a=b",
+						"c=d",
+					},
 				},
 			},
-			expected: expected{
-				dockerfileName: "",
-				err:            assert.AnError,
-			},
+			expected: []string{"--name \"test\"", "--var a=\"b\" --var c=\"d\""},
 		},
 		{
-			name: "with dockerignore",
+			name: "multiword var value",
 			config: config{
-				opts: &Options{},
+				opts: &Options{
+					Name:      "test",
+					Variables: []string{"test=multi word value"},
+				},
 			},
-			expected: expected{
-				dockerfileName: filepath.Clean("/test/Dockerfile.destroy"),
-			},
+			expected: []string{"--name \"test\"", "--var test=\"multi word value\""},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wdCtrl.SetErrors(tt.config.wd)
-			rdc := remoteDestroyCommand{
-				fs:                   fs,
-				destroyImage:         "test-image",
-				workingDirectoryCtrl: wdCtrl,
-				registry:             newFakeRegistry(),
-			}
-			dockerfileName, err := rdc.createDockerfile("/test", tt.config.opts)
-			assert.ErrorIs(t, err, tt.expected.err)
-			assert.Equal(t, tt.expected.dockerfileName, dockerfileName)
-
-			if tt.expected.err == nil {
-				_, err = rdc.fs.Stat(filepath.Join("/test", dockerfileTemporalNane))
-				assert.NoError(t, err)
-				content, err := afero.ReadFile(rdc.fs, filepath.Join("/test", dockerfileTemporalNane))
-				assert.NoError(t, err)
-				assert.True(t, strings.Contains(string(content), fmt.Sprintf("ARG %s", model.OktetoActionNameEnvVar)))
-			}
-
+			flags, err := getCommandFlags(tt.config.opts)
+			assert.Equal(t, tt.expected, flags)
+			assert.NoError(t, err)
 		})
 	}
 }
 
-func Test_getOktetoCLIVersion(t *testing.T) {
-	var tests = []struct {
-		name                                 string
-		versionString, expected, cliImageEnv string
+func TestDestroyRemoteWithCtx(t *testing.T) {
+	workdirCtrl := fakefs.NewFakeWorkingDirectoryCtrl("/path/to/manifest")
+	manifest := &model.Manifest{
+		Destroy: &model.DestroyInfo{
+			Context: "../..",
+			Image:   "test-image",
+			Commands: []model.DeployCommand{
+				{
+					Name:    "command 1",
+					Command: "test-command",
+				},
+			},
+		},
+		External: map[string]*externalresource.ExternalResource{
+			"test": {
+				Icon: "database",
+			},
+		},
+	}
+
+	expectedParams := &remote.Params{
+		BaseImage:        manifest.Destroy.Image,
+		ManifestPathFlag: "/path/to/manifest/okteto.yml",
+		TemplateName:     templateName,
+		CommandFlags:     []string{"--name \"test\""},
+		DockerfileName:   dockerfileTemporalName,
+		Deployable: deployable.Entity{
+			Commands: manifest.Destroy.Commands,
+			External: manifest.External,
+		},
+		OktetoCommandSpecificEnvVars: map[string]string{
+			"OKTETO_IS_PREVIEW_ENVIRONMENT": "",
+		},
+		BuildEnvVars:                make(map[string]string),
+		DependenciesEnvVars:         make(map[string]string),
+		Manifest:                    manifest,
+		Command:                     remote.DestroyCommand,
+		UseOktetoDeployIgnoreFile:   true,
+		ContextAbsolutePathOverride: "/path",
+	}
+	runner := &fakeRemoteRunner{}
+	runner.On("Run", mock.Anything, expectedParams).Return(nil)
+	rd := &remoteDestroyCommand{
+		runner:      runner,
+		workdirCtrl: workdirCtrl,
+	}
+	opts := &Options{
+		Name:             "test",
+		Manifest:         manifest,
+		ManifestPathFlag: "/path/to/manifest/okteto.yml",
+	}
+	err := rd.Destroy(context.Background(), opts)
+	require.NoError(t, err)
+	runner.AssertExpectations(t)
+}
+
+func TestDestroyRemote(t *testing.T) {
+	workdirCtrl := fakefs.NewFakeWorkingDirectoryCtrl("/path/to/manifest")
+	manifest := &model.Manifest{
+		Destroy: &model.DestroyInfo{
+			Image: "test-image",
+			Commands: []model.DeployCommand{
+				{
+					Name:    "command 1",
+					Command: "test-command",
+				},
+			},
+		},
+		External: map[string]*externalresource.ExternalResource{
+			"test": {
+				Icon: "database",
+			},
+		},
+	}
+
+	expectedParams := &remote.Params{
+		BaseImage:        manifest.Destroy.Image,
+		ManifestPathFlag: "/path/to/manifest/okteto.yml",
+		TemplateName:     templateName,
+		CommandFlags:     []string{"--name \"test\""},
+		DockerfileName:   dockerfileTemporalName,
+		Deployable: deployable.Entity{
+			Commands: manifest.Destroy.Commands,
+			External: manifest.External,
+		},
+		OktetoCommandSpecificEnvVars: map[string]string{
+			"OKTETO_IS_PREVIEW_ENVIRONMENT": "",
+		},
+		BuildEnvVars:                make(map[string]string),
+		DependenciesEnvVars:         make(map[string]string),
+		Manifest:                    manifest,
+		Command:                     remote.DestroyCommand,
+		UseOktetoDeployIgnoreFile:   true,
+		ContextAbsolutePathOverride: "/path/to/manifest",
+	}
+	runner := &fakeRemoteRunner{}
+	runner.On("Run", mock.Anything, expectedParams).Return(nil)
+	rd := &remoteDestroyCommand{
+		runner:      runner,
+		workdirCtrl: workdirCtrl,
+	}
+	opts := &Options{
+		Name:             "test",
+		Manifest:         manifest,
+		ManifestPathFlag: "/path/to/manifest/okteto.yml",
+	}
+	err := rd.Destroy(context.Background(), opts)
+	require.NoError(t, err)
+	runner.AssertExpectations(t)
+}
+
+func TestDestroyRemoteWithError(t *testing.T) {
+	workdirCtrl := fakefs.NewFakeWorkingDirectoryCtrl("/path/to/manifest")
+	manifest := &model.Manifest{
+		Destroy: &model.DestroyInfo{
+			Image: "test-image",
+			Commands: []model.DeployCommand{
+				{
+					Name:    "command 1",
+					Command: "test-command",
+				},
+			},
+		},
+		External: map[string]*externalresource.ExternalResource{
+			"test": {
+				Icon: "database",
+			},
+		},
+	}
+
+	expectedParams := &remote.Params{
+		BaseImage:        manifest.Destroy.Image,
+		ManifestPathFlag: "/path/to/manifest/okteto.yml",
+		TemplateName:     templateName,
+		CommandFlags:     []string{"--name \"test\""},
+		DockerfileName:   dockerfileTemporalName,
+		Deployable: deployable.Entity{
+			Commands: manifest.Destroy.Commands,
+			External: manifest.External,
+		},
+		OktetoCommandSpecificEnvVars: map[string]string{
+			"OKTETO_IS_PREVIEW_ENVIRONMENT": "",
+		},
+		BuildEnvVars:                make(map[string]string),
+		DependenciesEnvVars:         make(map[string]string),
+		Manifest:                    manifest,
+		Command:                     remote.DestroyCommand,
+		UseOktetoDeployIgnoreFile:   true,
+		ContextAbsolutePathOverride: "/path/to/manifest",
+	}
+
+	tests := []struct {
+		err           error
+		expectedCheck func(err error) bool
+		name          string
 	}{
 		{
-			name:          "no version string and no env return latest",
-			versionString: "",
-			expected:      "okteto/okteto:latest",
+			name: "WithOktetoCommandErr",
+			err: buildkit.CommandErr{
+				Stage: "test",
+				Err:   assert.AnError,
+			},
+			expectedCheck: func(err error) bool {
+				return errors.Is(err, assert.AnError)
+			},
 		},
 		{
-			name:          "no version string return env value",
-			versionString: "",
-			cliImageEnv:   "okteto/remote:test",
-			expected:      "okteto/remote:test",
+			name: "WithUserError",
+			err: oktetoErrors.UserError{
+				E: assert.AnError,
+			},
+			expectedCheck: func(err error) bool {
+				return errors.As(err, &oktetoErrors.UserError{})
+			},
 		},
 		{
-			name:          "found version string",
-			versionString: "2.2.2",
-			expected:      "okteto/okteto:2.2.2",
-		},
-		{
-			name:          "found incorrect version string return latest ",
-			versionString: "2.a.2",
-			expected:      "okteto/okteto:latest",
+			name: "WithOtherError",
+			err:  assert.AnError,
+			expectedCheck: func(err error) bool {
+				return errors.Is(err, assert.AnError)
+			},
 		},
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.cliImageEnv != "" {
-				t.Setenv(constants.OktetoDeployRemoteImage, tt.cliImageEnv)
+			runner := &fakeRemoteRunner{}
+			runner.On("Run", mock.Anything, expectedParams).Return(tt.err)
+			rd := &remoteDestroyCommand{
+				runner:      runner,
+				workdirCtrl: workdirCtrl,
 			}
-
-			version := getOktetoCLIVersion(tt.versionString)
-			require.Equal(t, version, tt.expected)
+			opts := &Options{
+				Name:             "test",
+				Manifest:         manifest,
+				ManifestPathFlag: "/path/to/manifest/okteto.yml",
+			}
+			err := rd.Destroy(context.Background(), opts)
+			require.True(t, tt.expectedCheck(err))
+			runner.AssertExpectations(t)
 		})
 	}
-}
-
-func TestRemoteDestroyWithSshAgent(t *testing.T) {
-	fs := afero.NewMemMapFs()
-	socket, err := os.CreateTemp("", "okteto-test-ssh-*")
-	require.NoError(t, err)
-	defer socket.Close()
-
-	knowHostFile, err := os.CreateTemp("", "okteto-test-know_hosts-*")
-	require.NoError(t, err)
-	defer socket.Close()
-
-	assertFn := func(o *types.BuildOptions) {
-		assert.Contains(t, o.SshSessions, types.BuildSshSession{Id: "remote", Target: socket.Name()})
-		assert.Contains(t, o.Secrets, fmt.Sprintf("id=known_hosts,src=%s", knowHostFile.Name()))
-	}
-
-	envvarName := fmt.Sprintf("TEST_SOCKET_%s", os.Getenv("RANDOM"))
-
-	os.Setenv(envvarName, socket.Name())
-	defer func() {
-		t.Logf("cleaning up %s envvar", envvarName)
-		os.Unsetenv(envvarName)
-	}()
-	rdc := remoteDestroyCommand{
-		sshAuthSockEnvvar:    envvarName,
-		knownHostsPath:       knowHostFile.Name(),
-		builder:              fakeBuilder{assertOptions: assertFn},
-		fs:                   fs,
-		workingDirectoryCtrl: filesystem.NewFakeWorkingDirectoryCtrl(filepath.Clean("/")),
-		temporalCtrl:         filesystem.NewTemporalDirectoryCtrl(fs),
-		clusterMetadata: func(context.Context) (*types.ClusterMetadata, error) {
-			return &types.ClusterMetadata{}, nil
-		},
-	}
-
-	assert.NoError(t, rdc.destroy(context.Background(), &Options{}))
-}
-
-func TestRemoteDestroyWithBadSshAgent(t *testing.T) {
-	fs := afero.NewMemMapFs()
-
-	assertFn := func(o *types.BuildOptions) {
-		assert.NotContains(t, o.SshSessions, types.BuildSshSession{Id: "remote", Target: "bad-socket"})
-		assert.NotContains(t, o.Secrets, fmt.Sprintf("id=known_hosts,src=%s", "inexistent-file"))
-	}
-
-	envvarName := fmt.Sprintf("TEST_SOCKET_%s", os.Getenv("RANDOM"))
-
-	os.Setenv(envvarName, "bad-socket")
-	defer func() {
-		t.Logf("cleaning up %s envvar", envvarName)
-		os.Unsetenv(envvarName)
-	}()
-
-	rdc := remoteDestroyCommand{
-		sshAuthSockEnvvar:    envvarName,
-		knownHostsPath:       "inexistent-file",
-		builder:              fakeBuilder{assertOptions: assertFn},
-		fs:                   fs,
-		workingDirectoryCtrl: filesystem.NewFakeWorkingDirectoryCtrl(filepath.Clean("/")),
-		temporalCtrl:         filesystem.NewTemporalDirectoryCtrl(fs),
-		clusterMetadata: func(context.Context) (*types.ClusterMetadata, error) {
-			return &types.ClusterMetadata{}, nil
-		},
-	}
-
-	assert.NoError(t, rdc.destroy(context.Background(), &Options{}))
 }

@@ -15,7 +15,6 @@ package okteto
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 
@@ -36,9 +35,9 @@ func TestDeployPipeline(t *testing.T) {
 		err      error
 	}
 	testCases := []struct {
+		expected expected
 		name     string
 		input    input
-		expected expected
 	}{
 		{
 			name: "with variables - error",
@@ -261,9 +260,9 @@ func TestGetPipelineByName(t *testing.T) {
 		err      error
 	}
 	testCases := []struct {
-		name     string
-		input    input
 		expected expected
+		input    input
+		name     string
 	}{
 		{
 			name: "error",
@@ -364,9 +363,9 @@ func TestDestroyPipeline(t *testing.T) {
 		err      error
 	}
 	testCases := []struct {
+		expected expected
 		name     string
 		input    input
-		expected expected
 	}{
 		{
 			name: "destroy volumes - error",
@@ -478,106 +477,6 @@ func TestDestroyPipeline(t *testing.T) {
 				err: nil,
 			},
 		},
-		{
-			name: "destroy volumes ->  deprecated error -> error",
-			input: input{
-				client: &fakeGraphQLMultipleCallsClient{
-					errs: []error{
-						errors.New("Cannot query field \"action\" on type \"GitDeploy\""),
-						assert.AnError,
-					},
-				},
-				name:           "test",
-				destroyVolumes: true,
-			},
-			expected: expected{
-				response: nil,
-				err:      assert.AnError,
-			},
-		},
-		{
-			name: "destroy no volumes ->  deprecated error -> error",
-			input: input{
-				client: &fakeGraphQLMultipleCallsClient{
-					errs: []error{
-						errors.New("Cannot query field \"action\" on type \"GitDeploy\""),
-						assert.AnError,
-					},
-				},
-				name:           "test",
-				destroyVolumes: false,
-			},
-			expected: expected{
-				response: nil,
-				err:      assert.AnError,
-			},
-		},
-		{
-			name: "destroy volumes ->  deprecated error -> error",
-			input: input{
-				client: &fakeGraphQLMultipleCallsClient{
-					errs: []error{
-						errors.New("Cannot query field \"action\" on type \"GitDeploy\""),
-					},
-					mutationResult: []interface{}{
-						nil,
-						&deprecatedDestroyPipelineWithVolumesMutation{
-							Response: deprecatedDestroyPipelineResponse{
-								GitDeploy: gitDeployInfoWithRepoInfo{
-									Id:         "test",
-									Name:       "test",
-									Status:     ProgressingStatus,
-									Repository: "my-repo",
-								},
-							},
-						},
-					},
-				},
-				name:           "test",
-				destroyVolumes: true,
-			},
-			expected: expected{
-				response: &types.GitDeployResponse{
-					GitDeploy: &types.GitDeploy{
-						ID:     "test",
-						Status: progressingStatus,
-					},
-				},
-				err: nil,
-			},
-		},
-		{
-			name: "destroy no volumes ->  deprecated error -> no error",
-			input: input{
-				client: &fakeGraphQLMultipleCallsClient{
-					errs: []error{
-						errors.New("Cannot query field \"action\" on type \"GitDeploy\""),
-					},
-					mutationResult: []interface{}{
-						nil,
-						&deprecatedDestroyPipelineWithoutVolumesMutation{
-							Response: deprecatedDestroyPipelineResponse{
-								GitDeploy: gitDeployInfoWithRepoInfo{
-									Id:     "test",
-									Status: ProgressingStatus,
-								},
-							},
-						},
-					},
-				},
-				name:           "test",
-				destroyVolumes: false,
-			},
-			expected: expected{
-				response: &types.GitDeployResponse{
-					GitDeploy: &types.GitDeploy{
-						ID:     "test",
-						Status: progressingStatus,
-					},
-				},
-				err: nil,
-			},
-		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -602,9 +501,9 @@ func TestGetPipelineResourcesStatus(t *testing.T) {
 		err      error
 	}
 	testCases := []struct {
-		name     string
-		input    input
 		expected expected
+		input    input
+		name     string
 	}{
 		{
 			name: "error",

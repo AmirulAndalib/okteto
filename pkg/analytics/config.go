@@ -25,8 +25,6 @@ import (
 )
 
 var (
-	CloudContext      = "Cloud"
-	StagingContext    = "Staging"
 	EnterpriseContext = "Enterprise"
 	KubernetesContext = "Kubernetes"
 	currentAnalytics  *Analytics
@@ -34,20 +32,13 @@ var (
 
 // Analytics contains the analytics configuration
 type Analytics struct {
-	Enabled   bool   `json:"enabled"`
 	MachineID string `json:"machineID"`
+	Enabled   bool   `json:"enabled"`
 }
 
-func getContextType(oktetoContext string) string {
+func getContextType() string {
 	if okteto.IsOkteto() {
-		switch oktetoContext {
-		case okteto.CloudURL:
-			return CloudContext
-		case okteto.StagingURL:
-			return StagingContext
-		default:
-			return EnterpriseContext
-		}
+		return EnterpriseContext
 	}
 	return KubernetesContext
 }
@@ -120,7 +111,7 @@ func (a *Analytics) save() error {
 	}
 	marshalled, err := json.MarshalIndent(a, "", "\t")
 	if err != nil {
-		return fmt.Errorf("failed to generate analytics file: %s", err)
+		return fmt.Errorf("failed to generate analytics file: %w", err)
 	}
 
 	oktetoHome := config.GetOktetoHome()
@@ -132,12 +123,12 @@ func (a *Analytics) save() error {
 	if _, err := os.Stat(analyticsPath); err == nil {
 		err = os.Chmod(analyticsPath, 0600)
 		if err != nil {
-			return fmt.Errorf("couldn't change analytics permissions: %s", err)
+			return fmt.Errorf("couldn't change analytics permissions: %w", err)
 		}
 	}
 
 	if err := os.WriteFile(analyticsPath, marshalled, 0600); err != nil {
-		return fmt.Errorf("couldn't save analytics: %s", err)
+		return fmt.Errorf("couldn't save analytics: %w", err)
 	}
 
 	return nil
@@ -159,8 +150,8 @@ func Enable() error {
 }
 
 func getTrackID() string {
-	if okteto.Context().UserID != "" {
-		return okteto.Context().UserID
+	if okteto.GetContext().UserID != "" {
+		return okteto.GetContext().UserID
 	}
 	a := get()
 	return a.MachineID

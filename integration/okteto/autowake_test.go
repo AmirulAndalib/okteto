@@ -131,19 +131,19 @@ spec:
     app: autowake-sfs
 `
 
-	oktetoManifestV1Name    = "okteto.yml"
-	oktetoManifestV1Content = `
-name: autowake
-image: python:alpine
-command:
-  - sh
-  - -c
-  - "echo -n $VAR > var.html && python -m http.server 8080"
-forward:
-  - 8080:8080
-workdir: /usr/src/app
-persistentVolume:
-  enabled: false
+	oktetoManifestV2Name    = "okteto.yml"
+	oktetoManifestV2Content = `dev:
+  autowake:
+    image: python:alpine
+    command:
+      - sh
+      - -c
+      - "echo -n $VAR > var.html && python -m http.server 8080"
+    forward:
+      - 8080:8080
+    workdir: /usr/src/app
+    persistentVolume:
+      enabled: false
 `
 	indexHTMLName = "index.html"
 
@@ -165,17 +165,18 @@ func TestAutoWakeFromURL(t *testing.T) {
 	oktetoPath, err := integration.GetOktetoPath()
 	require.NoError(t, err)
 
-	testNamespace := integration.GetTestNamespace("TestAutoWakeURL", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 	c, _, err := okteto.NewK8sClientProvider().Provide(kubeconfig.Get([]string{filepath.Join(dir, ".kube", "config")}))
 	require.NoError(t, err)
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
 
 	// Prepare test environment
 	require.NoError(t, writeDeployment(dir))
@@ -214,7 +215,7 @@ func TestAutoWakeFromURL(t *testing.T) {
 	// Wake resources from url
 	require.NotEmpty(t, integration.GetContentFromURL(autowakeURL, timeout))
 	require.NoError(t, waitUntilUpdatedContent(autowakeURL, "test", timeout))
-
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 // TestAutoWakeFromURL tests the following scenario:
@@ -229,17 +230,18 @@ func TestAutoWakeFromRunningUp(t *testing.T) {
 	oktetoPath, err := integration.GetOktetoPath()
 	require.NoError(t, err)
 
-	testNamespace := integration.GetTestNamespace("TestAutoWakeUp", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 	c, _, err := okteto.NewK8sClientProvider().Provide(kubeconfig.Get([]string{filepath.Join(dir, ".kube", "config")}))
 	require.NoError(t, err)
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
 
 	// Prepare test environment
 	require.NoError(t, writeDeployment(dir))
@@ -291,6 +293,7 @@ func TestAutoWakeFromRunningUp(t *testing.T) {
 	}
 	require.NoError(t, commands.RunOktetoDown(oktetoPath, downOpts))
 	require.True(t, commands.HasUpCommandFinished(upCommand.Pid.Pid))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func writeDeployment(dir string) error {
@@ -321,8 +324,8 @@ func writeIndexHTML(dir string) error {
 }
 
 func writeOktetoManifest(dir string) error {
-	manifestManifestPath := filepath.Join(dir, oktetoManifestV1Name)
-	manifestContentBytes := []byte(oktetoManifestV1Content)
+	manifestManifestPath := filepath.Join(dir, oktetoManifestV2Name)
+	manifestContentBytes := []byte(oktetoManifestV2Content)
 	if err := os.WriteFile(manifestManifestPath, manifestContentBytes, 0600); err != nil {
 		return err
 	}

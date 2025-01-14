@@ -16,12 +16,13 @@ package types
 // Preview represents an Okteto preview environment
 type Preview struct {
 	ID            string        `json:"id" yaml:"id"`
-	Sleeping      bool          `json:"sleeping" yaml:"sleeping"`
 	Scope         string        `json:"scope" yaml:"scope"`
+	Branch        string        `json:"branch" yaml:"branch"`
 	GitDeploys    []GitDeploy   `json:"gitDeploys"`
 	Statefulsets  []Statefulset `json:"statefulsets"`
 	Deployments   []Deployment  `json:"deployments"`
 	PreviewLabels []string      `json:"previewLabels" yaml:"previewLabels"`
+	Sleeping      bool          `json:"sleeping" yaml:"sleeping"`
 }
 
 // PreviewResponse represents the response of a deployPreview

@@ -1,16 +1,30 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package build
 
 import (
-	"github.com/moby/buildkit/client"
-	oktetoLog "github.com/okteto/okteto/pkg/log"
-	"github.com/stretchr/testify/assert"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/moby/buildkit/client"
+	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewBuildKitLogsFilterEmptyRules(t *testing.T) {
-	lf := NewBuildKitLogsFilter([]Rule{})
+	lf := NewBuildKitLogsFilter([]LogRule{}, []ErrorRule{})
 
 	v := &client.Vertex{
 		Name:  "test log message",
@@ -31,14 +45,14 @@ func TestNewBuildKitLogsFilterEmptyRules(t *testing.T) {
 func TestNewBuildKitLogsFilter(t *testing.T) {
 	now := time.Now()
 
-	rules := []Rule{
+	rules := []LogRule{
 		{
 			condition:   BuildKitMissingCacheCondition,
 			transformer: BuildKitMissingCacheTransformer,
 		},
 	}
 
-	lf := NewBuildKitLogsFilter(rules)
+	lf := NewBuildKitLogsFilter(rules, []ErrorRule{})
 
 	v := &client.Vertex{
 		Name:      "importing cache manifest from test-registry.com/test-account/test-repo",
@@ -69,8 +83,8 @@ func TestNewBuildKitLogsFilter(t *testing.T) {
 
 func TestBuildKitMissingCacheCondition(t *testing.T) {
 	tests := []struct {
-		name     string
 		v        *client.Vertex
+		name     string
 		expected bool
 	}{
 		{

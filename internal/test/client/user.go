@@ -1,3 +1,5 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
@@ -15,15 +17,17 @@ import (
 	"context"
 
 	dockertypes "github.com/docker/cli/cli/config/types"
+	"github.com/okteto/okteto/pkg/env"
 	"github.com/okteto/okteto/pkg/types"
 )
 
 // FakeUserClient is used to mock the userClient interface
 type FakeUserClient struct {
-	userCtx           *types.UserContext
-	userSecrets       []types.Secret
-	err               []error
-	errGetUserSecrets error
+	errGetPlatformVariables error
+	userCtx                 *types.UserContext
+	platformVariables       []env.Var
+	err                     []error
+	ClusterMetadata         types.ClusterMetadata
 }
 
 func NewFakeUsersClient(user *types.User, err ...error) *FakeUserClient {
@@ -35,7 +39,7 @@ func NewFakeUsersClientWithContext(userCtx *types.UserContext, err ...error) *Fa
 }
 
 func (c *FakeUserClient) GetContext(_ context.Context, _ string) (*types.UserContext, error) {
-	if c.err != nil && len(c.err) > 0 {
+	if len(c.err) > 0 {
 		err := c.err[0]
 		c.err = c.err[1:]
 		if err != nil {
@@ -46,21 +50,28 @@ func (c *FakeUserClient) GetContext(_ context.Context, _ string) (*types.UserCon
 	return c.userCtx, nil
 }
 
-func (c *FakeUserClient) GetUserSecrets(_ context.Context) ([]types.Secret, error) {
-	if c.errGetUserSecrets != nil {
-		return nil, c.errGetUserSecrets
+func (c *FakeUserClient) GetOktetoPlatformVariables(_ context.Context) ([]env.Var, error) {
+	if c.errGetPlatformVariables != nil {
+		return nil, c.errGetPlatformVariables
 	}
-	return c.userSecrets, nil
+	return c.platformVariables, nil
 }
 
 func (*FakeUserClient) GetClusterCertificate(_ context.Context, _, _ string) ([]byte, error) {
 	return nil, nil
 }
 
-func (*FakeUserClient) GetClusterMetadata(_ context.Context, _ string) (types.ClusterMetadata, error) {
-	return types.ClusterMetadata{}, nil
+func (c *FakeUserClient) GetClusterMetadata(_ context.Context, _ string) (types.ClusterMetadata, error) {
+	if len(c.err) > 0 {
+		return types.ClusterMetadata{}, c.err[0]
+	}
+	return c.ClusterMetadata, nil
 }
 
 func (*FakeUserClient) GetRegistryCredentials(_ context.Context, _ string) (dockertypes.AuthConfig, error) {
 	return dockertypes.AuthConfig{}, nil
+}
+
+func (*FakeUserClient) GetExecutionEnv(_ context.Context) (map[string]string, error) {
+	return map[string]string{}, nil
 }

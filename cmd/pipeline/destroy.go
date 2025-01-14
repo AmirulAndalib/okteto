@@ -26,7 +26,7 @@ import (
 	"github.com/okteto/okteto/pkg/devenvironment"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
-	"github.com/okteto/okteto/pkg/model"
+	modelUtils "github.com/okteto/okteto/pkg/model/utils"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/types"
 	"github.com/spf13/cobra"
@@ -35,6 +35,7 @@ import (
 // destroyFlags represents the user input for a pipeline destroy command
 type destroyFlags struct {
 	name           string
+	k8sContext     string
 	namespace      string
 	wait           bool
 	destroyVolumes bool
@@ -55,16 +56,14 @@ func destroy(ctx context.Context) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "destroy",
-		Short: "Destroy an okteto pipeline",
-		Args:  utils.NoArgsAccepted("https://www.okteto.com/docs/reference/cli/#destroy-1"),
+		Short: "Runs a job in the cluster that clones a repository and executes okteto destroy on it.",
+		Args:  utils.NoArgsAccepted("https://www.okteto.com/docs/reference/okteto-cli/#destroy-1"),
+		Example: `To run the destroy without the Okteto CLI wait for its completion, use the '--wait=false' flag:
+okteto pipeline destroy --wait=false`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctxResource := &model.ContextResource{}
-			if err := ctxResource.UpdateNamespace(flags.namespace); err != nil {
-				return err
-			}
-
-			ctxOptions := &contextCMD.ContextOptions{
-				Namespace: ctxResource.Namespace,
+			ctxOptions := &contextCMD.Options{
+				Namespace: flags.namespace,
+				Context:   flags.k8sContext,
 				Show:      true,
 			}
 			if err := contextCMD.NewContextCommand().Run(ctx, ctxOptions); err != nil {
@@ -84,11 +83,12 @@ func destroy(ctx context.Context) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&flags.name, "name", "p", "", "name of the pipeline (defaults to the git config name)")
-	cmd.Flags().StringVarP(&flags.namespace, "namespace", "n", "", "namespace where the pipeline is destroyed (defaults to the current namespace)")
-	cmd.Flags().BoolVarP(&flags.wait, "wait", "w", false, "wait until the pipeline finishes (defaults to false)")
-	cmd.Flags().BoolVarP(&flags.destroyVolumes, "volumes", "v", false, "destroy persistent volumes created by the pipeline (defaults to false)")
-	cmd.Flags().DurationVarP(&flags.timeout, "timeout", "t", (5 * time.Minute), "the length of time to wait for completion, zero means never. Any other values should contain a corresponding time unit e.g. 1s, 2m, 3h ")
+	cmd.Flags().StringVarP(&flags.name, "name", "p", "", "the name of the Development Environment")
+	cmd.Flags().StringVarP(&flags.k8sContext, "context", "c", "", "overwrite the current Okteto Context")
+	cmd.Flags().StringVarP(&flags.namespace, "namespace", "n", "", "overwrite the current Okteto Namespace")
+	cmd.Flags().BoolVarP(&flags.wait, "wait", "w", true, "wait until the Development Environment is destroyed")
+	cmd.Flags().BoolVarP(&flags.destroyVolumes, "volumes", "v", false, "destroy persistent volumes created by the Development Environment")
+	cmd.Flags().DurationVarP(&flags.timeout, "timeout", "t", fiveMinutes, "the duration to wait for the Development Environment to be destroyed. Any value should contain a corresponding time unit e.g. 1s, 2m, 3h")
 	return cmd
 }
 
@@ -225,22 +225,22 @@ func (o *DestroyOptions) setDefaults() error {
 		if err != nil {
 			return fmt.Errorf("failed to get the current working directory: %w", err)
 		}
-		repo, err := model.GetRepositoryURL(cwd)
+		repo, err := modelUtils.GetRepositoryURL(cwd)
 		if err != nil {
 			return err
 		}
 
-		c, _, err := okteto.NewK8sClientProvider().Provide(okteto.Context().Cfg)
+		c, _, err := okteto.NewK8sClientProvider().Provide(okteto.GetContext().Cfg)
 		if err != nil {
 			return err
 		}
 		inferer := devenvironment.NewNameInferer(c)
 		// okteto pipeline destroy doesn't have a -f flag to specify the path, so we pass empty string
-		o.Name = inferer.InferNameFromDevEnvsAndRepository(context.Background(), repo, okteto.Context().Namespace, "", "")
+		o.Name = inferer.InferNameFromDevEnvsAndRepository(context.Background(), repo, okteto.GetContext().Namespace, "", "")
 	}
 
 	if o.Namespace == "" {
-		o.Namespace = okteto.Context().Namespace
+		o.Namespace = okteto.GetContext().Namespace
 	}
 	return nil
 }

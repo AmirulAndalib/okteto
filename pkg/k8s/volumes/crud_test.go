@@ -26,16 +26,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	fakecorev1 "k8s.io/client-go/kubernetes/typed/core/v1/fake"
-
 	k8sTesting "k8s.io/client-go/testing"
 )
 
 func Test_checkPVCValues(t *testing.T) {
 	className := "class"
+	blockVolumeMode := apiv1.PersistentVolumeBlock
 	var tests = []struct {
-		name      string
 		pvc       *apiv1.PersistentVolumeClaim
 		dev       *model.Dev
+		name      string
 		wantError bool
 	}{
 		{
@@ -116,7 +116,6 @@ func Test_checkPVCValues(t *testing.T) {
 			},
 			wantError: true,
 		},
-
 		{
 			name: "pvc-with-less-storage-size",
 			pvc: &apiv1.PersistentVolumeClaim{
@@ -153,6 +152,93 @@ func Test_checkPVCValues(t *testing.T) {
 				PersistentVolumeInfo: &model.PersistentVolumeInfo{
 					Size:         "20Gi",
 					StorageClass: "wrong-class",
+				},
+			},
+			wantError: true,
+		},
+		{
+			name: "pvc-with-same-access-mode",
+			pvc: &apiv1.PersistentVolumeClaim{
+				Spec: apiv1.PersistentVolumeClaimSpec{
+					StorageClassName: &className,
+					AccessModes:      []apiv1.PersistentVolumeAccessMode{apiv1.ReadWriteMany},
+					Resources: apiv1.ResourceRequirements{
+						Requests: apiv1.ResourceList{
+							"storage": resource.MustParse("10Gi"),
+						},
+					},
+				},
+			},
+			dev: &model.Dev{
+				PersistentVolumeInfo: &model.PersistentVolumeInfo{
+					Size:         "10Gi",
+					StorageClass: "class",
+					AccessMode:   apiv1.ReadWriteMany,
+				},
+			},
+			wantError: false,
+		},
+		{
+			name: "pvc-with-different-access-mode",
+			pvc: &apiv1.PersistentVolumeClaim{
+				Spec: apiv1.PersistentVolumeClaimSpec{
+					StorageClassName: &className,
+					AccessModes:      []apiv1.PersistentVolumeAccessMode{apiv1.ReadWriteMany},
+					Resources: apiv1.ResourceRequirements{
+						Requests: apiv1.ResourceList{
+							"storage": resource.MustParse("10Gi"),
+						},
+					},
+				},
+			},
+			dev: &model.Dev{
+				PersistentVolumeInfo: &model.PersistentVolumeInfo{
+					Size:         "10Gi",
+					StorageClass: "class",
+				},
+			},
+			wantError: true,
+		},
+		{
+			name: "pvc-with-same-volume-mode",
+			pvc: &apiv1.PersistentVolumeClaim{
+				Spec: apiv1.PersistentVolumeClaimSpec{
+					StorageClassName: &className,
+					VolumeMode:       &blockVolumeMode,
+					Resources: apiv1.ResourceRequirements{
+						Requests: apiv1.ResourceList{
+							"storage": resource.MustParse("10Gi"),
+						},
+					},
+				},
+			},
+			dev: &model.Dev{
+				PersistentVolumeInfo: &model.PersistentVolumeInfo{
+					Size:         "10Gi",
+					StorageClass: "class",
+					VolumeMode:   blockVolumeMode,
+				},
+			},
+			wantError: false,
+		},
+		{
+			name: "pvc-with-different-access-mode",
+			pvc: &apiv1.PersistentVolumeClaim{
+				Spec: apiv1.PersistentVolumeClaimSpec{
+					StorageClassName: &className,
+					VolumeMode:       &blockVolumeMode,
+					Resources: apiv1.ResourceRequirements{
+						Requests: apiv1.ResourceList{
+							"storage": resource.MustParse("10Gi"),
+						},
+					},
+				},
+			},
+			dev: &model.Dev{
+				PersistentVolumeInfo: &model.PersistentVolumeInfo{
+					Size:         "10Gi",
+					StorageClass: "class",
+					VolumeMode:   apiv1.PersistentVolumeFilesystem,
 				},
 			},
 			wantError: true,
@@ -231,21 +317,20 @@ func TestCreateForDev(t *testing.T) {
 	namespace := "test"
 
 	dev := &model.Dev{
-		Name:      "test",
-		Namespace: namespace,
-		Volumes:   []model.Volume{},
+		Name:    "test",
+		Volumes: []model.Volume{},
 	}
 
 	type verbAndError struct {
-		verb string
 		err  error
+		verb string
 	}
 
 	testTable := []struct {
 		name               string
-		expectedError      bool
-		addErrors          []verbAndError
 		existentPvcStorage string
+		addErrors          []verbAndError
+		expectedError      bool
 	}{
 		{
 			name:               "no error",
@@ -256,13 +341,13 @@ func TestCreateForDev(t *testing.T) {
 		{
 			name:               "get error",
 			expectedError:      true,
-			addErrors:          []verbAndError{{"get", assert.AnError}},
+			addErrors:          []verbAndError{{assert.AnError, "get"}},
 			existentPvcStorage: "2Gi",
 		},
 		{
 			name:               "update error",
 			expectedError:      true,
-			addErrors:          []verbAndError{{"update", assert.AnError}},
+			addErrors:          []verbAndError{{assert.AnError, "update"}},
 			existentPvcStorage: "2Gi",
 		},
 		{
@@ -278,7 +363,7 @@ func TestCreateForDev(t *testing.T) {
 		{
 			name:               "update error handled",
 			expectedError:      false,
-			addErrors:          []verbAndError{{"update", fmt.Errorf("persistentvolumeclaims \"%s\" is forbidden: only dynamically provisioned pvc can be resized and the storageclass that provisions the pvc must support resize", "test-okteto")}},
+			addErrors:          []verbAndError{{fmt.Errorf("persistentvolumeclaims \"%s\" is forbidden: only dynamically provisioned pvc can be resized and the storageclass that provisions the pvc must support resize", "test-okteto"), "update"}},
 			existentPvcStorage: "2Gi",
 		},
 	}
@@ -306,7 +391,7 @@ func TestCreateForDev(t *testing.T) {
 				})
 			}
 
-			err = CreateForDev(context.Background(), dev, c, "")
+			err = CreateForDev(context.Background(), dev, "", namespace, c)
 
 			if test.expectedError {
 				assert.Error(t, err)

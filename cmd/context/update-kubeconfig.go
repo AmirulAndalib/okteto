@@ -16,9 +16,12 @@ package context
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
+	"strings"
 
 	"github.com/okteto/okteto/cmd/utils"
 	"github.com/okteto/okteto/pkg/config"
+	"github.com/okteto/okteto/pkg/env"
 	"github.com/okteto/okteto/pkg/k8s/kubeconfig"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/okteto"
@@ -30,7 +33,7 @@ import (
 type kubeconfigController interface {
 	kubeconfigTokenController
 
-	updateOktetoContextExec(*okteto.OktetoContext) error
+	updateOktetoContextExec(*okteto.Context) error
 }
 
 type KubeconfigCMD struct {
@@ -40,7 +43,7 @@ type KubeconfigCMD struct {
 // newKubeconfigController creates a new command to update the kubeconfig stored in the okteto context
 func newKubeconfigController(okClientProvider oktetoClientProvider) *KubeconfigCMD {
 	var kubetokenController kubeconfigController
-	if utils.LoadBoolean(OktetoUseStaticKubetokenEnvVar) {
+	if env.LoadBoolean(OktetoUseStaticKubetokenEnvVar) {
 		kubetokenController = newStaticKubetokenController()
 	} else {
 		kubetokenController = newDynamicKubetokenController(okClientProvider)
@@ -56,24 +59,24 @@ func UpdateKubeconfigCMD(okClientProvider oktetoClientProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Hidden: true,
 		Use:    "update-kubeconfig",
-		Args:   utils.NoArgsAccepted("https://okteto.com/docs/reference/cli/#kubeconfig"),
+		Args:   utils.NoArgsAccepted("https://okteto.com/docs/reference/okteto-cli/#kubeconfig"),
 		Short:  "Download credentials for the Kubernetes cluster selected via 'okteto context'",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
-			// Run context command to get the Cfg into Okteto Context
-			if err := NewContextCommand(withKubeTokenController(kc.kubetokenController)).Run(ctx, &ContextOptions{}); err != nil {
+			// Run context command to get the Cfg into Okteto GetContext
+			if err := NewContextCommand(withKubeTokenController(kc.kubetokenController)).Run(ctx, &Options{}); err != nil {
 				return err
 			}
 
-			return kc.execute(okteto.Context(), config.GetKubeconfigPath())
+			return kc.execute(okteto.GetContext(), config.GetKubeconfigPath())
 		},
 	}
 
 	return cmd
 }
 
-func (k *KubeconfigCMD) execute(okCtx *okteto.OktetoContext, kubeconfigPaths []string) error {
+func (k *KubeconfigCMD) execute(okCtx *okteto.Context, kubeconfigPaths []string) error {
 	contextName := okCtx.Name
 	if okCtx.IsOkteto {
 		contextName = okteto.UrlToKubernetesContext(contextName)
@@ -95,8 +98,13 @@ func (k *KubeconfigCMD) execute(okCtx *okteto.OktetoContext, kubeconfigPaths []s
 	return nil
 }
 
-func updateCfgClusterCertificate(contextName string, okContext *okteto.OktetoContext) error {
+func updateCfgClusterCertificate(contextName string, okContext *okteto.Context) error {
 	if !okContext.IsStoredAsInsecure {
+		return nil
+	}
+
+	subdomain := strings.TrimPrefix(okContext.Registry, "registry.")
+	if okContext.Cfg.Clusters[contextName].Server != fmt.Sprintf("kubernetes.%s", subdomain) {
 		return nil
 	}
 

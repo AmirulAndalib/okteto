@@ -30,9 +30,9 @@ type DeployPreviewOptions struct {
 	Scope      string
 	Branch     string
 	Repository string
-	Wait       bool
 	OktetoHome string
 	Token      string
+	Wait       bool
 }
 
 // DestroyPreviewOptions defines the options that can be added to a deploy command
@@ -52,7 +52,7 @@ func RunOktetoDeployPreview(oktetoPath string, deployOptions *DeployPreviewOptio
 	if deployOptions.Scope != "" {
 		cmd.Args = append(cmd.Args, "--scope", deployOptions.Scope)
 	} else {
-		cmd.Args = append(cmd.Args, "--scope", "personal")
+		cmd.Args = append(cmd.Args, "--scope", "global")
 	}
 	if deployOptions.Branch != "" {
 		cmd.Args = append(cmd.Args, "--branch", deployOptions.Branch)
@@ -105,7 +105,7 @@ func RunOktetoPreviewDestroy(oktetoPath string, destroyOptions *DestroyPreviewOp
 	}
 	o, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("okteto deploy failed: %s - %s", string(o), err)
+		return fmt.Errorf("okteto deploy failed: %s - %w", string(o), err)
 	}
 	log.Printf("okteto destroy success")
 	return nil

@@ -15,12 +15,12 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"strconv"
 
 	"github.com/okteto/okteto/pkg/constants"
-	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/env"
+	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,49 +37,31 @@ func HasAccessToK8sClusterNamespace(ctx context.Context, namespace string, k8sCl
 	return true, nil
 }
 
-// HasAccessToOktetoClusterNamespace checks if the user has access to a namespace/preview
-func HasAccessToOktetoClusterNamespace(ctx context.Context, namespace string, oktetoClient types.OktetoInterface) (bool, error) {
-
-	nList, err := oktetoClient.Namespaces().List(ctx)
-	if err != nil {
-		return false, err
-	}
-
-	for i := range nList {
-		if nList[i].ID == namespace {
-			return true, nil
-		}
-	}
-
-	// added possibility to point a context to a preview environment (namespace)
-	// https://github.com/okteto/okteto/pull/2018
-	previewList, err := oktetoClient.Previews().List(ctx, []string{})
-	if err != nil {
-		return false, err
-	}
-
-	for i := range previewList {
-		if previewList[i].ID == namespace {
-			return true, nil
-		}
-	}
-
-	return false, nil
+// errFallback returns true when err is not found or namespace not found
+// meaning we need to fallback into previews get query
+func errFallback(err error) bool {
+	return err != nil &&
+		(errors.Is(err, oktetoErrors.ErrNamespaceNotFound) ||
+			errors.Is(err, oktetoErrors.ErrNotFound))
 }
 
-// LoadBoolean loads a boolean environment variable and returns it value
-func LoadBoolean(k string) bool {
-	v := os.Getenv(k)
-	if v == "" {
-		v = "false"
+// HasAccessToOktetoClusterNamespace checks if the user has access to a namespace/preview
+func HasAccessToOktetoClusterNamespace(ctx context.Context, namespace string, oktetoClient types.OktetoInterface) (bool, error) {
+	_, err := oktetoClient.Namespaces().Get(ctx, namespace)
+	if errFallback(err) {
+		// added possibility to point a context to a preview environment (namespace)
+		// https://github.com/okteto/okteto/pull/2018
+		_, err := oktetoClient.Previews().Get(ctx, namespace)
+		if err != nil && errors.Is(err, oktetoErrors.ErrNamespaceNotFound) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
+		return true, nil
+	} else if err != nil {
+		return false, err
 	}
-
-	h, err := strconv.ParseBool(v)
-	if err != nil {
-		oktetoLog.Yellow("'%s' is not a valid value for environment variable %s", v, k)
-	}
-
-	return h
+	return true, nil
 }
 
 // ShouldCreateNamespace checks if the user has access to the namespace.
@@ -89,12 +71,19 @@ func ShouldCreateNamespace(ctx context.Context, ns string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
+	return ShouldCreateNamespaceStateless(ctx, ns, c)
+}
+
+// ShouldCreateNamespaceStateless checks if the user has access to the namespace.
+// If not, ask the user if he wants to create it
+func ShouldCreateNamespaceStateless(ctx context.Context, ns string, c *okteto.Client) (bool, error) {
 	hasAccess, err := HasAccessToOktetoClusterNamespace(ctx, ns, c)
 	if err != nil {
 		return false, err
 	}
 	if !hasAccess {
-		if LoadBoolean(constants.OktetoWithinDeployCommandContextEnvVar) {
+		if env.LoadBoolean(constants.OktetoWithinDeployCommandContextEnvVar) {
 			return false, fmt.Errorf("cannot deploy on a namespace that doesn't exist. Please create %s and try again", ns)
 		}
 		create, err := AskYesNo(fmt.Sprintf("The namespace %s doesn't exist. Do you want to create it?", ns), YesNoDefault_Yes)

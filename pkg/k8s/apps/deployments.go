@@ -35,8 +35,8 @@ import (
 )
 
 type DeploymentApp struct {
-	kind string
 	d    *appsv1.Deployment
+	kind string
 }
 
 func NewDeploymentApp(d *appsv1.Deployment) *DeploymentApp {
@@ -62,7 +62,7 @@ func (i *DeploymentApp) Replicas() int32 {
 }
 
 func (i *DeploymentApp) SetReplicas(n int32) {
-	i.d.Spec.Replicas = pointer.Int32Ptr(n)
+	i.d.Spec.Replicas = pointer.Int32(n)
 }
 
 func (i *DeploymentApp) TemplateObjectMeta() metav1.ObjectMeta {
@@ -127,7 +127,7 @@ func (i *DeploymentApp) RestoreOriginal() error {
 	oktetoLog.Info("deprecated devmodeoff behavior")
 	dOrig := &appsv1.Deployment{}
 	if err := json.Unmarshal([]byte(manifest), dOrig); err != nil {
-		return fmt.Errorf("malformed manifest: %v", err)
+		return fmt.Errorf("malformed manifest: %w", err)
 	}
 	i.d = dOrig
 	return nil
@@ -166,11 +166,10 @@ func (i *DeploymentApp) Watch(ctx context.Context, result chan error, c kubernet
 				}
 				continue
 			}
-			switch e.Type {
-			case watch.Deleted:
+			if e.Type == watch.Deleted {
 				result <- oktetoErrors.ErrDeleteToApp
 				return
-			case watch.Modified:
+			} else if e.Type == watch.Modified {
 				d, ok := e.Object.(*appsv1.Deployment)
 				if !ok {
 					oktetoLog.Debugf("Failed to parse deployment event: %s", e)

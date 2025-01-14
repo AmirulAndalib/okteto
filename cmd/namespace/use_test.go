@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/okteto/okteto/internal/test/client"
+	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/types"
 	"github.com/stretchr/testify/assert"
@@ -27,6 +28,8 @@ func Test_useNamespace(t *testing.T) {
 	ctx := context.Background()
 	currentNs := "test"
 	var tests = []struct {
+		errGetNamespace   error
+		errGetPreview     error
 		name              string
 		changeToNs        string
 		currentNamespaces []types.Namespace
@@ -60,15 +63,17 @@ func Test_useNamespace(t *testing.T) {
 					ID: currentNs,
 				},
 			},
-			changeToNs:  "test-1",
-			expectedErr: true,
+			errGetNamespace: oktetoErrors.ErrNamespaceNotFound,
+			errGetPreview:   oktetoErrors.ErrNamespaceNotFound,
+			changeToNs:      "test-1",
+			expectedErr:     true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			okteto.CurrentStore = &okteto.OktetoContextStore{
-				Contexts: map[string]*okteto.OktetoContext{
+			okteto.CurrentStore = &okteto.ContextStore{
+				Contexts: map[string]*okteto.Context{
 					"test": {
 						Name:     "test",
 						Token:    "test",
@@ -82,12 +87,14 @@ func Test_useNamespace(t *testing.T) {
 				Token: "test",
 			}
 			fakeOktetoClient := &client.FakeOktetoClient{
-				Namespace:       client.NewFakeNamespaceClient(tt.currentNamespaces, nil),
-				Preview:         client.NewFakePreviewClient(&client.FakePreviewResponse{}),
+				Namespace: client.NewFakeNamespaceClient(tt.currentNamespaces, tt.errGetNamespace),
+				Preview: client.NewFakePreviewClient(&client.FakePreviewResponse{
+					ErrGetPreview: tt.errGetPreview,
+				}),
 				Users:           client.NewFakeUsersClient(usr),
 				KubetokenClient: client.NewFakeKubetokenClient(client.FakeKubetokenResponse{}),
 			}
-			nsCmd := &NamespaceCommand{
+			nsCmd := &Command{
 				okClient: fakeOktetoClient,
 				ctxCmd:   newFakeContextCommand(fakeOktetoClient, usr),
 			}
@@ -97,7 +104,7 @@ func Test_useNamespace(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 
-				assert.Equal(t, tt.changeToNs, okteto.Context().Namespace)
+				assert.Equal(t, tt.changeToNs, okteto.GetContext().Namespace)
 			}
 
 		})

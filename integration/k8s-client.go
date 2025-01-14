@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package integration
 
 import (
@@ -96,16 +109,26 @@ func GetStatefulsetList(ctx context.Context, ns string, client kubernetes.Interf
 	return sfsList.Items, err
 }
 
+// GetVolume returns a volume given a namespace and name
+func GetVolume(ctx context.Context, ns, name string, client kubernetes.Interface) (*corev1.PersistentVolumeClaim, error) {
+	return client.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+}
+
 // WaitForDeployment waits until a deployment is rollout correctly
 func WaitForDeployment(kubectlBinary string, kubectlOpts *commands.KubectlOptions, revision int, timeout time.Duration) error {
 	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
 	to := time.NewTicker(timeout)
+	defer to.Stop()
+
 	retry := 0
 	for {
 		select {
 		case <-to.C:
 			return fmt.Errorf("%s didn't rollout after %s", kubectlOpts.Name, timeout.String())
 		case <-ticker.C:
+			retry++
 			output, err := commands.RunKubectlRolloutDeployment(kubectlBinary, kubectlOpts, revision)
 			if err != nil {
 				continue
@@ -118,7 +141,8 @@ func WaitForDeployment(kubectlBinary string, kubectlOpts *commands.KubectlOption
 			if strings.Contains(output, "is different from the running revision") {
 				r := regexp.MustCompile(`\(\d+\)`)
 				matches := r.FindAllString(output, -1)
-				if len(matches) == 2 {
+				validMatchesLength := 2
+				if len(matches) == validMatchesLength {
 					desiredVersion := strings.ReplaceAll(strings.ReplaceAll(matches[0], "(", ""), ")", "")
 					runningVersion := strings.ReplaceAll(strings.ReplaceAll(matches[0], "(", ""), ")", "")
 					if desiredVersion <= runningVersion {
@@ -169,7 +193,7 @@ func DestroyPod(ctx context.Context, ns, labelSelector string, c kubernetes.Inte
 
 	pods, err := c.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
-		return fmt.Errorf("failed to retrieve deployment %s pods: %s", labelSelector, err.Error())
+		return fmt.Errorf("failed to retrieve deployment %s pods: %w", labelSelector, err)
 	}
 	var zero int64 = 0
 	if len(pods.Items) == 0 {
@@ -183,7 +207,7 @@ func DestroyPod(ctx context.Context, ns, labelSelector string, c kubernetes.Inte
 			metav1.DeleteOptions{GracePeriodSeconds: &zero},
 		)
 		if err != nil {
-			return fmt.Errorf("error deleting pod %s: %s", pods.Items[idx].Name, err.Error())
+			return fmt.Errorf("error deleting pod %s: %w", pods.Items[idx].Name, err)
 		}
 	}
 

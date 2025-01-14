@@ -14,22 +14,23 @@
 package filesystem
 
 import (
+	"bufio"
 	"io"
 	"os"
-	"path/filepath"
 
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/spf13/afero"
 )
 
-func FileExistsWithFilesystem(name string, fs afero.Fs) bool {
-	_, err := fs.Stat(name)
+// FileExistsWithFilesystem return true if the file exists or if there is an error.
+func FileExistsWithFilesystem(path string, fs afero.Fs) bool {
+	_, err := fs.Stat(path)
 	if os.IsNotExist(err) {
 		return false
 	}
 
 	if err != nil {
-		oktetoLog.Infof("failed to check if %s exists: %s", name, err)
+		oktetoLog.Infof("failed to check if %s exists: %s", path, err)
 	}
 
 	return true
@@ -41,7 +42,6 @@ func FileExists(name string) bool {
 	if os.IsNotExist(err) {
 		return false
 	}
-
 	if err != nil {
 		oktetoLog.Infof("failed to check if %s exists: %s", name, err)
 	}
@@ -81,23 +81,56 @@ func CopyFile(from, to string) error {
 	return nil
 }
 
-// FileExistsAndNotDir checks if the file exists and its not a dir
-func FileExistsAndNotDir(filename string) bool {
-	info, err := os.Stat(filename)
+// FileExistsAndNotDir checks if the file exists, and it's not a dir
+func FileExistsAndNotDir(path string, fs afero.Fs) bool {
+	info, err := fs.Stat(path)
 	if err != nil && os.IsNotExist(err) {
 		return false
 	}
 	return !info.IsDir()
 }
 
-// GetFilePathFromWdAndFiles joins the cwd with the files and returns it if
-// one of them exists and is not a directory
-func GetFilePathFromWdAndFiles(cwd string, files []string) string {
-	for _, name := range files {
-		path := filepath.Join(cwd, name)
-		if FileExistsAndNotDir(path) {
-			return path
-		}
+// IsDir checks if a path is a dir or not
+func IsDir(path string, fs afero.Fs) bool {
+	info, err := fs.Stat(path)
+	if err != nil {
+		return false
 	}
-	return ""
+	return info.IsDir()
+}
+
+// GetLastNLines returns the last N lines of a file up to a max amount of bytes
+func GetLastNLines(fs afero.Fs, path string, n int, maxChunkByteSize int64) ([]string, error) {
+	file, err := fs.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	var offset int64
+	if stat.Size() > maxChunkByteSize {
+		offset = stat.Size() - maxChunkByteSize
+	}
+
+	_, err = file.Seek(offset, io.SeekStart)
+	if err != nil {
+		return nil, err
+	}
+
+	scanner := bufio.NewScanner(file)
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+
+	return lines, nil
 }

@@ -35,15 +35,18 @@ var (
 
 // listFlags are the flags available for list commands
 type listFlags struct {
-	labels []string
-	output string
+	output     string
+	k8sContext string
+	namespace  string
+	labels     []string
 }
 
 type previewOutput struct {
 	Name     string   `json:"name" yaml:"name"`
 	Scope    string   `json:"scope" yaml:"scope"`
-	Sleeping bool     `json:"sleeping" yaml:"sleeping"`
+	Branch   string   `json:"branch" yaml:"branch"`
 	Labels   []string `json:"labels" yaml:"labels"`
+	Sleeping bool     `json:"sleeping" yaml:"sleeping"`
 }
 
 type listPreviewCommand struct {
@@ -62,9 +65,12 @@ func List(ctx context.Context) *cobra.Command {
 	flags := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List all preview environments",
+		Short: "List all Preview Environments",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctxOptions := &contextCMD.ContextOptions{}
+			ctxOptions := &contextCMD.Options{
+				Namespace: flags.namespace,
+				Context:   flags.k8sContext,
+			}
 
 			if flags.output == "" {
 				ctxOptions.Show = true
@@ -86,7 +92,10 @@ func List(ctx context.Context) *cobra.Command {
 			return listCmd.run(ctx)
 		},
 	}
-	cmd.Flags().StringArrayVarP(&flags.labels, "label", "", []string{}, "tag and organize preview environments using labels (multiple --label flags accepted)")
+
+	cmd.Flags().StringVarP(&flags.k8sContext, "context", "c", "", "overwrite the current Okteto Context")
+	cmd.Flags().StringVarP(&flags.namespace, "namespace", "n", "", "overwrites the current Okteto Namespace")
+	cmd.Flags().StringArrayVarP(&flags.labels, "label", "", []string{}, "tag and organize Preview Environments using labels (multiple --label flags accepted)")
 	cmd.Flags().StringVarP(&flags.output, "output", "o", "", "output format. One of: ['json', 'yaml']")
 
 	return cmd
@@ -136,7 +145,7 @@ func displayListPreviews(previews []previewOutput, outputFormat string) error {
 			return nil
 		}
 		w := tabwriter.NewWriter(os.Stdout, 1, 1, 2, ' ', 0)
-		fmt.Fprint(w, "Name\tScope\tSleeping\tLabels\n")
+		fmt.Fprint(w, "Name\tScope\tSleeping\tBranch\tLabels\n")
 		for _, preview := range previews {
 			output := getPreviewDefaultOutput(preview)
 			fmt.Fprint(w, output)
@@ -152,7 +161,7 @@ func getPreviewDefaultOutput(preview previewOutput) string {
 	if len(preview.Labels) > 0 {
 		previewLabels = strings.Join(preview.Labels, ", ")
 	}
-	return fmt.Sprintf("%s\t%s\t%v\t%s\n", preview.Name, preview.Scope, preview.Sleeping, previewLabels)
+	return fmt.Sprintf("%s\t%s\t%v\t%s\t%s\n", preview.Name, preview.Scope, preview.Sleeping, preview.Branch, previewLabels)
 }
 
 // getPreviewOutput transforms type.Preview into previewOutput type
@@ -164,6 +173,7 @@ func getPreviewOutput(previews []types.Preview) []previewOutput {
 			Scope:    p.Scope,
 			Sleeping: p.Sleeping,
 			Labels:   p.PreviewLabels,
+			Branch:   p.Branch,
 		}
 		previewSlice = append(previewSlice, previewOutput)
 	}

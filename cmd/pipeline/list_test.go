@@ -17,6 +17,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"testing"
+
 	contextCMD "github.com/okteto/okteto/cmd/context"
 	"github.com/okteto/okteto/pkg/constants"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
@@ -28,8 +30,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/clientcmd/api"
-	"testing"
 )
 
 func mockPipeline(fakeName string, fakeLabels []string) *apiv1.ConfigMap {
@@ -59,12 +59,12 @@ func mockPipeline(fakeName string, fakeLabels []string) *apiv1.ConfigMap {
 func TestPipelineListCommandHandler_OnlyOktetoCluster(t *testing.T) {
 	ctx := context.Background()
 
-	initOkCtx := func(ctx context.Context, flags *contextCMD.ContextOptions) error {
+	initOkCtx := func(ctx context.Context, flags *contextCMD.Options) error {
 		return nil
 	}
 
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
 			"test": {
 				Namespace: "test",
 				IsOkteto:  false,
@@ -81,12 +81,12 @@ func TestPipelineListCommandHandler_OnlyOktetoCluster(t *testing.T) {
 func TestPipelineListCommandHandler_InitOktetoContextFail(t *testing.T) {
 	ctx := context.Background()
 
-	initOkCtx := func(ctx context.Context, flags *contextCMD.ContextOptions) error {
+	initOkCtx := func(ctx context.Context, flags *contextCMD.Options) error {
 		return assert.AnError
 	}
 
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
 			"test": {
 				Namespace: "test",
 				IsOkteto:  true,
@@ -100,48 +100,12 @@ func TestPipelineListCommandHandler_InitOktetoContextFail(t *testing.T) {
 	assert.ErrorIs(t, err, assert.AnError)
 }
 
-func TestPipelineListCommandHandler_DefaultNamespace(t *testing.T) {
-	ctx := context.Background()
-
-	flags := &listFlags{
-		namespace: "",
-	}
-
-	initOkCtx := func(ctx context.Context, flags *contextCMD.ContextOptions) error {
-		return nil
-	}
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Namespace: "test",
-				IsOkteto:  true,
-				Name:      "test",
-				Token:     "test-token",
-				Cfg: &api.Config{
-					CurrentContext: "test",
-					Contexts: map[string]*api.Context{
-						"test": {
-							Namespace: "test",
-						},
-					},
-				},
-			},
-		},
-		CurrentContext: "test",
-	}
-
-	_ = pipelineListCommandHandler(ctx, flags, initOkCtx)
-
-	assert.Equal(t, flags.namespace, "test")
-
-}
-
 func TestExecuteListPipelines(t *testing.T) {
 	type input struct {
-		flags                 listFlags
+		c                     kubernetes.Interface
 		listPipelines         listPipelinesFn
 		getPipelineListOutput getPipelineListOutputFn
-		c                     kubernetes.Interface
+		flags                 listFlags
 	}
 
 	listPipelinesWithError := func(ctx context.Context, namespace, labelSelector string, c kubernetes.Interface) ([]apiv1.ConfigMap, error) {
@@ -149,11 +113,11 @@ func TestExecuteListPipelines(t *testing.T) {
 	}
 
 	tests := []struct {
+		expectedError         error
 		name                  string
-		input                 input
 		output                string
 		expectedPrintedOutput string
-		expectedError         error
+		input                 input
 	}{
 		{
 			name: "error - empty label",
@@ -442,7 +406,7 @@ dev4  dev4-status  https://dev4-repository  dev4-branch  -
 			// Redirect the log output to a buffer for our test
 			var buf bytes.Buffer
 
-			err := executeListPipelines(context.Background(), tt.input.flags, tt.input.listPipelines, tt.input.getPipelineListOutput, tt.input.c, &buf)
+			err := executeListPipelines(context.Background(), tt.input.flags, tt.input.flags.namespace, tt.input.listPipelines, tt.input.getPipelineListOutput, tt.input.c, &buf)
 
 			if tt.expectedError == nil {
 				assert.NoError(t, err)
@@ -457,16 +421,16 @@ dev4  dev4-status  https://dev4-repository  dev4-branch  -
 
 func TestGetPipelineListOutput(t *testing.T) {
 	type input struct {
+		c             kubernetes.Interface
+		listPipelines listPipelinesFn
 		flags         listFlags
 		namespace     string
 		labels        []string
-		listPipelines listPipelinesFn
-		c             kubernetes.Interface
 	}
 
 	type output struct {
-		pipelines []pipelineListItem
 		err       error
+		pipelines []pipelineListItem
 	}
 
 	listPipelinesWithError := func(ctx context.Context, namespace, labelSelector string, c kubernetes.Interface) ([]apiv1.ConfigMap, error) {

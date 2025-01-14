@@ -17,7 +17,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/okteto/okteto/pkg/types"
+	"github.com/okteto/okteto/pkg/env"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -25,13 +25,13 @@ func Test_setSecrets(t *testing.T) {
 	key := "key"
 	expectedValue := "value"
 	var tests = []struct {
-		name    string
-		secrets []types.Secret
 		envs    map[string]string
+		name    string
+		secrets []env.Var
 	}{
 		{
 			name: "create new env var from secret",
-			secrets: []types.Secret{
+			secrets: []env.Var{
 				{
 					Name:  key,
 					Value: expectedValue,
@@ -41,7 +41,7 @@ func Test_setSecrets(t *testing.T) {
 		},
 		{
 			name: "not overwrite env var from secret",
-			secrets: []types.Secret{
+			secrets: []env.Var{
 				{
 					Name:  key,
 					Value: "random-value",
@@ -56,10 +56,9 @@ func Test_setSecrets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for k, v := range tt.envs {
-				err := os.Setenv(k, v)
-				assert.NoError(t, err)
+				t.Setenv(k, v)
 			}
-			setSecrets(tt.secrets)
+			exportPlatformVariablesToEnv(tt.secrets)
 			assert.Equal(t, expectedValue, os.Getenv(key))
 		})
 	}

@@ -36,20 +36,21 @@ import (
 
 var (
 	ErrWaitResourcesTimeout = errors.New("preview environment didn't finish after on time")
+	fiveMinutes             = 5 * time.Minute
 )
 
 type DeployOptions struct {
-	branch             string
-	deprecatedFilename string
-	file               string
-	name               string
-	repository         string
-	scope              string
-	sourceUrl          string
-	timeout            time.Duration
-	variables          []string
-	wait               bool
-	labels             []string
+	branch     string
+	file       string
+	k8sContext string
+	name       string
+	repository string
+	scope      string
+	sourceUrl  string
+	variables  []string
+	labels     []string
+	timeout    time.Duration
+	wait       bool
 }
 
 // Deploy Deploy a preview environment
@@ -57,8 +58,10 @@ func Deploy(ctx context.Context) *cobra.Command {
 	opts := &DeployOptions{}
 	cmd := &cobra.Command{
 		Use:   "deploy <name>",
-		Short: "Deploy a preview environment",
+		Short: "Deploy a Preview Environment",
 		Args:  utils.MaximumNArgsAccepted(1, ""),
+		Example: `To deploy a preview environment without the Okteto CLI wait for its completion, use the '--wait=false' flag:
+okteto preview deploy --wait=false`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -69,10 +72,9 @@ func Deploy(ctx context.Context) *cobra.Command {
 				return err
 			}
 
-			if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.ContextOptions{}); err != nil {
+			if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.Options{Show: true, Context: opts.k8sContext}); err != nil {
 				return err
 			}
-			oktetoLog.Information("Using %s @ %s as context", opts.name, okteto.RemoveSchema(okteto.Context().Name))
 
 			if !okteto.IsOkteto() {
 				return oktetoErrors.ErrContextIsNotOktetoCluster
@@ -85,20 +87,17 @@ func Deploy(ctx context.Context) *cobra.Command {
 			return previewCmd.ExecuteDeployPreview(ctx, opts)
 		},
 	}
-	cmd.Flags().StringVarP(&opts.branch, "branch", "b", "", "the branch to deploy (defaults to the current branch)")
-	cmd.Flags().StringVarP(&opts.repository, "repository", "r", "", "the repository to deploy (defaults to the current repository)")
-	cmd.Flags().StringVarP(&opts.scope, "scope", "s", "personal", "the scope of preview environment to create. Accepted values are ['personal', 'global']")
+	cmd.Flags().StringVarP(&opts.k8sContext, "context", "c", "", "overwrite the current Okteto Context")
+	cmd.Flags().StringVarP(&opts.branch, "branch", "b", "", "the branch to deploy (defaults to your current branch)")
+	cmd.Flags().StringVarP(&opts.repository, "repository", "r", "", "the repository to deploy (defaults to your current repository)")
+	cmd.Flags().StringVarP(&opts.scope, "scope", "s", "global", "the scope of Preview Environment to create. Accepted values are ['personal', 'global']")
 	cmd.Flags().StringVarP(&opts.sourceUrl, "sourceUrl", "", "", "the URL of the original pull/merge request.")
-	cmd.Flags().DurationVarP(&opts.timeout, "timeout", "t", (5 * time.Minute), "the length of time to wait for completion, zero means never. Any other values should contain a corresponding time unit e.g. 1s, 2m, 3h ")
-	cmd.Flags().StringArrayVarP(&opts.variables, "var", "v", []string{}, "set a preview environment variable (can be set more than once)")
-	cmd.Flags().BoolVarP(&opts.wait, "wait", "w", false, "wait until the preview environment deployment finishes (defaults to false)")
-	cmd.Flags().StringVarP(&opts.file, "file", "f", "", "relative path within the repository to the okteto manifest (default to okteto.yaml or .okteto/okteto.yaml)")
-	cmd.Flags().StringArrayVarP(&opts.labels, "label", "", []string{}, "set a preview environment label (can be set more than once)")
+	cmd.Flags().DurationVarP(&opts.timeout, "timeout", "t", fiveMinutes, "the duration to wait for the deployment to complete. Any value should contain a corresponding time unit e.g. 1s, 2m, 3h")
+	cmd.Flags().StringArrayVarP(&opts.variables, "var", "v", []string{}, "set a variable to be injected in the deploy commands (can be set more than once)")
+	cmd.Flags().BoolVarP(&opts.wait, "wait", "w", true, "wait until the deployment finishes")
+	cmd.Flags().StringVarP(&opts.file, "file", "f", "", "the path to the Okteto Manifest")
+	cmd.Flags().StringArrayVarP(&opts.labels, "label", "", []string{}, "tag and organize Preview Environments using labels (multiple --label flags accepted)")
 
-	cmd.Flags().StringVarP(&opts.deprecatedFilename, "filename", "", "", "relative path within the repository to the manifest file (default to okteto-pipeline.yaml or .okteto/okteto-pipeline.yaml)")
-	if err := cmd.Flags().MarkHidden("filename"); err != nil {
-		oktetoLog.Infof("failed to hide deprecated flag: %s", err)
-	}
 	return cmd
 }
 
@@ -129,8 +128,9 @@ func (pw *Command) deployPreview(ctx context.Context, opts *DeployOptions) (*typ
 
 	var varList []types.Variable
 	for _, v := range opts.variables {
-		kv := strings.SplitN(v, "=", 2)
-		if len(kv) != 2 {
+		variableFormatParts := 2
+		kv := strings.SplitN(v, "=", variableFormatParts)
+		if len(kv) != variableFormatParts {
 			return nil, fmt.Errorf("invalid variable value '%s': must follow KEY=VALUE format", v)
 		}
 		varList = append(varList, types.Variable{

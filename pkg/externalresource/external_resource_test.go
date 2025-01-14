@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package externalresource
 
 import (
@@ -56,10 +69,10 @@ func TestExternalResource_LoadMarkdownContent(t *testing.T) {
 	assert.NoError(t, err)
 
 	tests := []struct {
-		name                string
 		externalResourceFSM ERFilesystemManager
-		expectErr           bool
+		name                string
 		expectedResult      ExternalResource
+		expectErr           bool
 	}{
 		{
 			name: "markdown not found",
@@ -138,11 +151,11 @@ func TestExternalResource_SetURLUsingEnvironFile(t *testing.T) {
 	externalResourceName := "test"
 	newURLvalue := "/new/url/value"
 	tests := []struct {
-		name                     string
+		expectedErr              error
+		envsToSet                map[string]string
 		externalResource         *ExternalResource
 		expectedExternalResource *ExternalResource
-		envsToSet                map[string]string
-		expectedErr              error
+		name                     string
 	}{
 		{
 			name: "error - empty url value",
@@ -237,6 +250,34 @@ func TestExternalResource_SetURLUsingEnvironFile(t *testing.T) {
 			if err == nil {
 				assert.Equal(t, tt.expectedExternalResource, tt.externalResource)
 			}
+		})
+	}
+}
+func TestSection_IsEmpty(t *testing.T) {
+	tests := []struct {
+		section  Section
+		name     string
+		expected bool
+	}{
+		{
+			name:     "empty section",
+			section:  Section{},
+			expected: true,
+		},
+		{
+			name: "non-empty section",
+			section: Section{
+				"external1": &ExternalResource{},
+				"external2": &ExternalResource{},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := tt.section.IsEmpty()
+			assert.Equal(t, tt.expected, actual)
 		})
 	}
 }

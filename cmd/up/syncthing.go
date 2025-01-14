@@ -26,8 +26,13 @@ import (
 	"github.com/spf13/afero"
 )
 
+const (
+	defaultProgressBarWidth = 40
+	totalProgressValue      = 100
+)
+
 func (up *upContext) initializeSyncthing() error {
-	sy, err := syncthing.New(up.Dev)
+	sy, err := syncthing.New(up.Dev, up.Namespace, up.Fs)
 	if err != nil {
 		return err
 	}
@@ -37,7 +42,7 @@ func (up *upContext) initializeSyncthing() error {
 	oktetoLog.Infof("local syncthing initialized: gui -> %d, sync -> %d", up.Sy.LocalGUIPort, up.Sy.LocalPort)
 	oktetoLog.Infof("remote syncthing initialized: gui -> %d, sync -> %d", up.Sy.RemoteGUIPort, up.Sy.RemotePort)
 
-	if err := up.Sy.SaveConfig(up.Dev); err != nil {
+	if err := up.Sy.SaveConfig(up.Dev, up.Namespace); err != nil {
 		oktetoLog.Infof("error saving syncthing object: %s", err)
 	}
 
@@ -52,9 +57,11 @@ func (up *upContext) sync(ctx context.Context) error {
 	}
 
 	start := time.Now()
-	if err := config.UpdateStateFile(up.Dev.Name, up.Dev.Namespace, config.Synchronizing); err != nil {
+	if err := config.UpdateStateFile(up.Dev.Name, up.Namespace, config.Synchronizing); err != nil {
 		return err
 	}
+
+	up.checkForSystemErrors(ctx)
 
 	startSyncFiles := time.Now()
 	if err := up.synchronizeFiles(ctx); err != nil {
@@ -70,14 +77,12 @@ func (up *upContext) sync(ctx context.Context) error {
 
 	elapsed := time.Since(start)
 	up.analyticsMeta.InitialSyncDuration(elapsed)
-	maxDuration := time.Duration(1) * time.Minute
-	if elapsed > maxDuration {
-		minutes := elapsed / time.Minute
-		elapsed -= minutes * time.Minute
-		seconds := elapsed / time.Second
-		oktetoLog.Warning(`File synchronization took %dm %ds
+	maxDuration := 1 * time.Minute
+	if time.Duration(elapsed.Minutes()) > maxDuration {
+		elapsedString := elapsed.String()
+		oktetoLog.Warning(`File synchronization took %s
     Consider to update your '.stignore' to optimize the file synchronization
-    More information is available here: https://okteto.com/docs/reference/file-synchronization/`, minutes, seconds)
+    More information is available here: https://okteto.com/docs/reference/file-synchronization/`, elapsedString)
 	}
 
 	up.Sy.Type = "sendreceive"
@@ -99,7 +104,7 @@ func (up *upContext) startSyncthing(ctx context.Context) error {
 		defer oktetoLog.StopSpinner()
 	}
 
-	if err := config.UpdateStateFile(up.Dev.Name, up.Dev.Namespace, config.StartingSync); err != nil {
+	if err := config.UpdateStateFile(up.Dev.Name, up.Namespace, config.StartingSync); err != nil {
 		return err
 	}
 
@@ -113,7 +118,7 @@ func (up *upContext) startSyncthing(ctx context.Context) error {
 
 	if err := up.Sy.WaitForPing(ctx, false); err != nil {
 		oktetoLog.Infof("failed to ping syncthing: %s", err.Error())
-		if oktetoErrors.IsTransient(err) {
+		if up.isTransient(err) {
 			return err
 		}
 		return up.checkOktetoStartError(ctx, "Failed to connect to the synchronization service")
@@ -135,6 +140,21 @@ func (up *upContext) startSyncthing(ctx context.Context) error {
 	return up.Sy.WaitForConnected(ctx)
 }
 
+// checkForSystemErrors is called when syncthing is started to check for system errors (ie. available disk space is lower than 1%) and print a warning
+func (up *upContext) checkForSystemErrors(ctx context.Context) {
+	if up.Dev.IsHybridModeEnabled() {
+		return
+	}
+
+	oktetoLog.Spinner("Verifying synchronization errors...")
+	oktetoLog.StartSpinner()
+	defer oktetoLog.StopSpinner()
+
+	if up.Sy.IsLocalRunningOutOfSpace(ctx) {
+		oktetoLog.Warning("Your local disk is almost full. Please free up some space to avoid synchronization issues.")
+	}
+}
+
 func (up *upContext) synchronizeFiles(ctx context.Context) error {
 	if !up.Dev.IsHybridModeEnabled() {
 		oktetoLog.Spinner("Synchronizing your files...")
@@ -142,7 +162,7 @@ func (up *upContext) synchronizeFiles(ctx context.Context) error {
 		defer oktetoLog.StopSpinner()
 	}
 
-	progressBar := utils.NewSyncthingProgressBar(40)
+	progressBar := utils.NewSyncthingProgressBar(defaultProgressBarWidth)
 	defer progressBar.Finish()
 
 	quit := make(chan bool)
@@ -203,7 +223,7 @@ func (up *upContext) synchronizeFiles(ctx context.Context) error {
 		}
 	}
 
-	progressBar.SetCurrent(100)
+	progressBar.SetCurrent(totalProgressValue)
 
 	return nil
 }

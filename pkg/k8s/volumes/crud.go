@@ -24,11 +24,9 @@ import (
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model"
-
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -47,18 +45,18 @@ func List(ctx context.Context, namespace, labels string, c kubernetes.Interface)
 }
 
 // CreateForDev deploys the volume claim for a given development container
-func CreateForDev(ctx context.Context, dev *model.Dev, c kubernetes.Interface, devPath string) error {
-	vClient := c.CoreV1().PersistentVolumeClaims(dev.Namespace)
+func CreateForDev(ctx context.Context, dev *model.Dev, devPath string, namespace string, c kubernetes.Interface) error {
+	vClient := c.CoreV1().PersistentVolumeClaims(namespace)
 	pvcForDev := translate(dev)
 	k8Volume, err := vClient.Get(ctx, pvcForDev.Name, metav1.GetOptions{})
 	if err != nil && !strings.Contains(err.Error(), "not found") {
-		return fmt.Errorf("error getting kubernetes volume claim: %s", err)
+		return fmt.Errorf("error getting kubernetes volume claim: %w", err)
 	}
 	if k8Volume.Name == "" {
 		oktetoLog.Infof("creating volume claim '%s'", pvcForDev.Name)
 		_, err = vClient.Create(ctx, pvcForDev, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("error creating kubernetes volume claim: %s", err)
+			return fmt.Errorf("error creating kubernetes volume claim: %w", err)
 		}
 	} else {
 		if err := checkPVCValues(k8Volume, dev, devPath); err != nil {
@@ -74,7 +72,7 @@ func CreateForDev(ctx context.Context, dev *model.Dev, c kubernetes.Interface, d
 			if !isDynamicallyProvisionedPVCError(err, pvcForDev.Name) {
 				return fmt.Errorf("error updating kubernetes volume claim: %w", err)
 			}
-			oktetoLog.Debug("could not update pvc in namespace %s: %w", dev.Namespace, err)
+			oktetoLog.Debug("could not update pvc in namespace %s: %s", namespace, err)
 			oktetoLog.Warning(`Could not increase the size of the dev volume from %s to %s:
 try running 'okteto down -v' and 'okteto up', or talk to your administrator
 (the PVC's storage class must support 'allowVolumeExpansion' to be able to upscale dev volumes).`,
@@ -134,10 +132,10 @@ func checkPVCValues(pvc *apiv1.PersistentVolumeClaim, dev *model.Dev, devPath st
 		}
 		dev.Metadata.Annotations[model.OktetoRestartAnnotation] = restartUUID
 		for _, s := range dev.Services {
-			if s.Annotations == nil {
-				s.Annotations = map[string]string{}
+			if s.Metadata.Annotations == nil {
+				s.Metadata.Annotations = map[string]string{}
 			}
-			s.Annotations[model.OktetoRestartAnnotation] = restartUUID
+			s.Metadata.Annotations[model.OktetoRestartAnnotation] = restartUUID
 		}
 	}
 
@@ -157,22 +155,38 @@ func checkPVCValues(pvc *apiv1.PersistentVolumeClaim, dev *model.Dev, devPath st
 			)
 		}
 	}
+
+	if len(pvc.Spec.AccessModes) == 1 && dev.PersistentVolumeAccessMode() != pvc.Spec.AccessModes[0] {
+		return fmt.Errorf(
+			"okteto volume access-mode is '%s' instead of '%s'. Run '%s' and try again",
+			pvc.Spec.AccessModes[0],
+			dev.PersistentVolumeAccessMode(),
+			utils.GetDownCommand(devPath),
+		)
+	}
+
+	if pvc.Spec.VolumeMode != nil && dev.PersistentVolumeMode() != *pvc.Spec.VolumeMode {
+		return fmt.Errorf(
+			"okteto volume mode is '%s' instead of '%s'. Run '%s' and try again",
+			*pvc.Spec.VolumeMode,
+			dev.PersistentVolumeMode(),
+			utils.GetDownCommand(devPath),
+		)
+	}
+
 	return nil
 
 }
 
-// DestroyDev destroys the persistent volume claim for a given development container
-func DestroyDev(ctx context.Context, dev *model.Dev, c *kubernetes.Clientset) error {
-	return Destroy(ctx, dev.GetVolumeName(), dev.Namespace, c, dev.Timeout.Default)
-}
-
 // Destroy destroys a persistent volume claim
-func Destroy(ctx context.Context, name, namespace string, c *kubernetes.Clientset, timeout time.Duration) error {
+func Destroy(ctx context.Context, name, namespace string, c kubernetes.Interface, timeout time.Duration) error {
 	vClient := c.CoreV1().PersistentVolumeClaims(namespace)
 	oktetoLog.Infof("destroying volume '%s'", name)
 
 	ticker := time.NewTicker(1 * time.Second)
-	to := time.Now().Add(timeout * 3) // 90 seconds
+	timeoutDuration := 3 * timeout
+	to := time.Now().Add(timeoutDuration) // 90 seconds
+	logDebounceInterval := 5
 
 	for i := 0; ; i++ {
 		err := vClient.Delete(ctx, name, metav1.DeleteOptions{})
@@ -193,7 +207,7 @@ func Destroy(ctx context.Context, name, namespace string, c *kubernetes.Clientse
 			return fmt.Errorf("volume claim '%s' wasn't destroyed after %s", name, timeout.String())
 		}
 
-		if i%10 == 5 {
+		if i%10 == logDebounceInterval {
 			oktetoLog.Infof("waiting for volume '%s' to be destroyed", name)
 		}
 
@@ -216,14 +230,14 @@ func DestroyWithoutTimeout(ctx context.Context, name, namespace string, c kubern
 	err := vClient.Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil {
 		if !oktetoErrors.IsNotFound(err) {
-			return fmt.Errorf("error deleting kubernetes volume: %s", err)
+			return fmt.Errorf("error deleting kubernetes volume: %w", err)
 		}
 	}
 
 	return nil
 }
 
-func checkIfAttached(ctx context.Context, name, namespace string, c *kubernetes.Clientset) error {
+func checkIfAttached(ctx context.Context, name, namespace string, c kubernetes.Interface) error {
 	pods, err := c.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		oktetoLog.Infof("failed to get available pods: %s", err)

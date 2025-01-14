@@ -23,7 +23,11 @@ import (
 	"github.com/okteto/okteto/pkg/cmd/doctor"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/log/io"
+	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/okteto"
+	"github.com/okteto/okteto/pkg/validator"
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 )
 
@@ -36,26 +40,45 @@ type doctorOptions struct {
 }
 
 // Doctor generates a zip file with all okteto-related log files
-func Doctor() *cobra.Command {
+func Doctor(k8sLogger *io.K8sLogger, fs afero.Fs) *cobra.Command {
 	doctorOpts := &doctorOptions{}
 	cmd := &cobra.Command{
-		Use:   "doctor [svc]",
-		Short: "Generate a zip file with the okteto logs",
-		Args:  utils.MaximumNArgsAccepted(1, "https://okteto.com/docs/reference/cli/#doctor"),
+		Use:   "doctor [devContainer]",
+		Short: "Generate a doctor file with all the information relevant for troubleshooting an issue. Use it when filing an issue or asking the Okteto community for help",
+		Args:  utils.MaximumNArgsAccepted(1, "https://okteto.com/docs/reference/okteto-cli/#doctor"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			oktetoLog.Info("starting doctor command")
+
+			if err := validator.FileArgumentIsNotDir(fs, doctorOpts.DevPath); err != nil {
+				return err
+			}
+
 			ctx := context.Background()
+
+			ctxOpts := &contextCMD.Options{
+				Show:      true,
+				Context:   doctorOpts.K8sContext,
+				Namespace: doctorOpts.Namespace,
+			}
+			if err := contextCMD.NewContextCommand().Run(ctx, ctxOpts); err != nil {
+				return err
+			}
 
 			if okteto.InDevContainer() {
 				return oktetoErrors.ErrNotInDevContainer
 			}
 
-			manifest, err := contextCMD.LoadManifestWithContext(ctx, contextCMD.ManifestOptions{Filename: doctorOpts.DevPath, Namespace: doctorOpts.Namespace, K8sContext: doctorOpts.K8sContext})
+			manifest, err := model.GetManifestV2(doctorOpts.DevPath, afero.NewOsFs())
 			if err != nil {
 				return err
 			}
 
-			c, _, err := okteto.GetK8sClient()
+			if !okteto.IsOkteto() {
+				if err := manifest.ValidateForCLIOnly(); err != nil {
+					return err
+				}
+			}
+			c, _, err := okteto.GetK8sClientWithLogger(k8sLogger)
 			if err != nil {
 				return err
 			}
@@ -75,7 +98,7 @@ func Doctor() *cobra.Command {
 					return err
 				}
 			}
-			filename, err := doctor.Run(ctx, dev, doctorOpts.DevPath, c)
+			filename, err := doctor.Run(ctx, dev, doctorOpts.DevPath, okteto.GetContext().Namespace, c)
 			if err == nil {
 				oktetoLog.Information("Your doctor file is available at %s", filename)
 			}
@@ -83,8 +106,8 @@ func Doctor() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVarP(&doctorOpts.DevPath, "file", "f", utils.DefaultManifest, "path to the manifest file")
-	cmd.Flags().StringVarP(&doctorOpts.Namespace, "namespace", "n", "", "namespace where the up command was executing")
-	cmd.Flags().StringVarP(&doctorOpts.K8sContext, "context", "c", "", "context where the up command was executing")
+	cmd.Flags().StringVarP(&doctorOpts.DevPath, "file", "f", "", "the path to the Okteto Manifest")
+	cmd.Flags().StringVarP(&doctorOpts.Namespace, "namespace", "n", "", "overwrite the current Okteto Namespace")
+	cmd.Flags().StringVarP(&doctorOpts.K8sContext, "context", "c", "", "overwrite the current Okteto Context")
 	return cmd
 }

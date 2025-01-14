@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package up
 
 import (
@@ -12,8 +25,8 @@ import (
 )
 
 func TestWaitUntilAppAwaken(t *testing.T) {
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
 			"test": {
 				Cfg: &api.Config{},
 			},
@@ -21,10 +34,10 @@ func TestWaitUntilAppAwaken(t *testing.T) {
 		CurrentContext: "test",
 	}
 	tt := []struct {
+		expectedErr          error
+		oktetoClientProvider *test.FakeK8sProvider
 		name                 string
 		autocreate           bool
-		oktetoClientProvider *test.FakeK8sProvider
-		expectedErr          error
 	}{
 		{
 			name:        "dev is autocreate",
@@ -55,8 +68,8 @@ func TestWaitUntilAppAwaken(t *testing.T) {
 }
 
 func TestWaitUntilDevelopmentContainerIsRunning(t *testing.T) {
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
 			"test": {
 				Cfg: &api.Config{},
 			},
@@ -64,9 +77,9 @@ func TestWaitUntilDevelopmentContainerIsRunning(t *testing.T) {
 		CurrentContext: "test",
 	}
 	tt := []struct {
-		name                 string
-		oktetoClientProvider *test.FakeK8sProvider
 		expectedErr          error
+		oktetoClientProvider *test.FakeK8sProvider
+		name                 string
 	}{
 		{
 			name: "failed to provide k8s client",

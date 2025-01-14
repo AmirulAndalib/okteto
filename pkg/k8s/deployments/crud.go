@@ -22,7 +22,6 @@ import (
 
 	"github.com/okteto/okteto/pkg/constants"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
-	"github.com/okteto/okteto/pkg/k8s/labels"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model"
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,21 +33,21 @@ import (
 )
 
 type patchAnnotations struct {
+	Value map[string]string `json:"value"`
 	Op    string            `json:"op"`
 	Path  string            `json:"path"`
-	Value map[string]string `json:"value"`
 }
 
 // Sandbox returns a base deployment for a dev
-func Sandbox(dev *model.Dev) *appsv1.Deployment {
-	image := dev.Image.Name
+func Sandbox(dev *model.Dev, namespace string) *appsv1.Deployment {
+	image := dev.Image
 	if image == "" {
 		image = model.DefaultImage
 	}
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dev.Name,
-			Namespace: dev.Namespace,
+			Namespace: namespace,
 			Labels: model.Labels{
 				constants.DevLabel: "true",
 			},
@@ -57,7 +56,7 @@ func Sandbox(dev *model.Dev) *appsv1.Deployment {
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: pointer.Int32Ptr(1),
+			Replicas: pointer.Int32(1),
 			Strategy: appsv1.DeploymentStrategy{
 				Type: appsv1.RecreateDeploymentStrategyType,
 			},
@@ -75,7 +74,8 @@ func Sandbox(dev *model.Dev) *appsv1.Deployment {
 				},
 				Spec: apiv1.PodSpec{
 					ServiceAccountName:            dev.ServiceAccount,
-					TerminationGracePeriodSeconds: pointer.Int64Ptr(0),
+					PriorityClassName:             dev.PriorityClassName,
+					TerminationGracePeriodSeconds: pointer.Int64(0),
 					Containers: []apiv1.Container{
 						{
 							Name:            "dev",
@@ -157,7 +157,7 @@ func CheckConditionErrors(deployment *appsv1.Deployment, dev *model.Dev) error {
 			} else if isResourcesRelatedError(c.Message) {
 				return getResourceLimitError(c.Message, dev)
 			}
-			return fmt.Errorf(c.Message)
+			return fmt.Errorf("%s", c.Message)
 		}
 	}
 	return nil
@@ -201,7 +201,7 @@ func getResourceLimitError(errorMessage string, dev *model.Dev) error {
 			errorToReturn += fmt.Sprintf("The value of resources.limits.memory in your okteto manifest (%s) exceeds the maximum memory limit per pod (%s). ", manifestMemory, maximumMemoryPerPod)
 		}
 	}
-	return fmt.Errorf(strings.TrimSpace(errorToReturn))
+	return fmt.Errorf("%s", strings.TrimSpace(errorToReturn))
 }
 
 // Deploy creates or updates a deployment
@@ -219,21 +219,16 @@ func Deploy(ctx context.Context, d *appsv1.Deployment, c kubernetes.Interface) (
 	return c.AppsV1().Deployments(d.Namespace).Create(ctx, d, metav1.CreateOptions{})
 }
 
-// IsDevModeOn returns if a deployment is in devmode
-func IsDevModeOn(d *appsv1.Deployment) bool {
-	return labels.Get(d.GetObjectMeta(), constants.DevLabel) != ""
-}
-
 // Destroy destroys a k8s deployment
 func Destroy(ctx context.Context, name, namespace string, c kubernetes.Interface) error {
 	oktetoLog.Infof("deleting deployment '%s'", name)
 	dClient := c.AppsV1().Deployments(namespace)
-	err := dClient.Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: pointer.Int64Ptr(0)})
+	err := dClient.Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: pointer.Int64(0)})
 	if err != nil {
 		if oktetoErrors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("error deleting kubernetes deployment: %s", err)
+		return fmt.Errorf("error deleting kubernetes deployment: %w", err)
 	}
 	oktetoLog.Infof("deployment '%s' deleted", name)
 	return nil

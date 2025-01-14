@@ -26,13 +26,13 @@ func TestCreateNamespace(t *testing.T) {
 		client *fakeGraphQLClient
 	}
 	type expected struct {
-		id  string
 		err error
+		id  string
 	}
 	testCases := []struct {
-		name     string
-		cfg      input
 		expected expected
+		cfg      input
+		name     string
 	}{
 		{
 			name: "error in graphql",
@@ -80,13 +80,13 @@ func TestDeleteNamespace(t *testing.T) {
 		client *fakeGraphQLClient
 	}
 	type expected struct {
-		id  string
 		err error
+		id  string
 	}
 	testCases := []struct {
-		name     string
-		cfg      input
 		expected expected
+		cfg      input
+		name     string
 	}{
 		{
 			name: "error in graphql",
@@ -133,13 +133,13 @@ func TestAddMembers(t *testing.T) {
 		client *fakeGraphQLClient
 	}
 	type expected struct {
-		id  string
 		err error
+		id  string
 	}
 	testCases := []struct {
-		name     string
-		cfg      input
 		expected expected
+		cfg      input
+		name     string
 	}{
 		{
 			name: "error in graphql",
@@ -186,12 +186,12 @@ func TestListNamespaces(t *testing.T) {
 		client *fakeGraphQLClient
 	}
 	type expected struct {
-		result []types.Namespace
 		err    error
+		result []types.Namespace
 	}
 	testCases := []struct {
-		name     string
 		cfg      input
+		name     string
 		expected expected
 	}{
 		{
@@ -256,13 +256,13 @@ func TestWakeNamespace(t *testing.T) {
 		client *fakeGraphQLClient
 	}
 	type expected struct {
-		id  string
 		err error
+		id  string
 	}
 	testCases := []struct {
-		name     string
 		cfg      input
 		expected expected
+		name     string
 	}{
 		{
 			name: "error in graphql",
@@ -309,13 +309,13 @@ func TestDestroyAllNamespace(t *testing.T) {
 		client *fakeGraphQLClient
 	}
 	type expected struct {
-		id  string
 		err error
+		id  string
 	}
 	testCases := []struct {
-		name     string
 		cfg      input
 		expected expected
+		name     string
 	}{
 		{
 			name: "error in graphql",
@@ -362,13 +362,13 @@ func TestSleepNamespace(t *testing.T) {
 		client *fakeGraphQLClient
 	}
 	type expected struct {
-		id  string
 		err error
+		id  string
 	}
 	testCases := []struct {
-		name     string
-		cfg      input
 		expected expected
+		cfg      input
+		name     string
 	}{
 		{
 			name: "error in graphql",
@@ -406,6 +406,61 @@ func TestSleepNamespace(t *testing.T) {
 			}
 			err := nc.Sleep(context.Background(), "")
 			assert.ErrorIs(t, err, tc.expected.err)
+		})
+	}
+}
+
+func TestGetNamespace(t *testing.T) {
+	type input struct {
+		client *fakeGraphQLClient
+	}
+	type expected struct {
+		err    error
+		result *types.Namespace
+	}
+	testCases := []struct {
+		expected expected
+		cfg      input
+		name     string
+	}{
+		{
+			name: "error in graphql",
+			cfg: input{
+				client: &fakeGraphQLClient{
+					err: assert.AnError,
+				},
+			},
+			expected: expected{
+				err: assert.AnError,
+			},
+		},
+		{
+			name: "graphql response is an namespace",
+			cfg: input{
+				client: &fakeGraphQLClient{
+					queryResult: &getNamespaceQuery{
+						Response: namespaceStatus{
+							Id: "test",
+						},
+					},
+				},
+			},
+			expected: expected{
+				result: &types.Namespace{
+					ID: "test",
+				},
+				err: nil,
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			nc := &namespaceClient{
+				client: tc.cfg.client,
+			}
+			ns, err := nc.Get(context.Background(), "")
+			assert.ErrorIs(t, err, tc.expected.err)
+			assert.Equal(t, tc.expected.result, ns)
 		})
 	}
 }

@@ -1,3 +1,5 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
@@ -25,19 +27,16 @@ type FakePipelineClient struct {
 
 // FakePipelineResponses represents the responses of the API
 type FakePipelineResponses struct {
-	DeployResponse *types.GitDeployResponse
-	DeployErr      error
-	DeployOpts     types.PipelineDeployOptions
+	DeployErr   error
+	ResourceErr error
+	WaitErr     error
+	DestroyErr  error
 
-	WaitErr error
-
+	DeployResponse  *types.GitDeployResponse
 	DestroyResponse *types.GitDeployResponse
-	DestroyErr      error
-
-	ResourcesMap map[string]string
-	ResourceErr  error
-
-	CallCount int
+	ResourcesMap    map[string]string
+	DeployOpts      types.PipelineDeployOptions
+	CallCount       int
 }
 
 // NewFakePipelineClient creates a pipeline client to use in tests

@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package build
 
 import (
@@ -6,10 +19,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/okteto/okteto/pkg/build"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model"
@@ -21,20 +34,23 @@ import (
 )
 
 func Test_validateImage(t *testing.T) {
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Namespace: "test",
-				Registry:  "this.is.my.okteto.registry",
-				IsOkteto:  true,
+	okCtx := &okteto.ContextStateless{
+		Store: &okteto.ContextStore{
+			Contexts: map[string]*okteto.Context{
+				"test": {
+					Namespace:       "test",
+					IsOkteto:        true,
+					Registry:        "test",
+					GlobalNamespace: "okteto",
+				},
 			},
+			CurrentContext: "test",
 		},
-		CurrentContext: "test",
 	}
 	tests := []struct {
+		want  error
 		name  string
 		image string
-		want  error
 	}{
 		{
 			name:  "okteto-dev-valid",
@@ -64,19 +80,18 @@ func Test_validateImage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := validateImage(tt.image); reflect.TypeOf(got) != reflect.TypeOf(tt.want) {
-				t.Errorf("build.validateImage = %v, want %v", reflect.TypeOf(got), reflect.TypeOf(tt.want))
-			}
+			result := validateImages(okCtx, tt.image)
+			assert.IsType(t, tt.want, result)
 		})
 	}
 }
 
 type mockRegistry struct {
-	isGlobal         bool
-	isOktetoRegistry bool
 	registry         string
 	repo             string
 	tag              string
+	isGlobal         bool
+	isOktetoRegistry bool
 }
 
 func (*mockRegistry) HasGlobalPushAccess() (bool, error) {
@@ -100,20 +115,13 @@ func (mr *mockRegistry) GetRepoNameAndTag(_ string) (string, string) {
 }
 
 func Test_OptsFromBuildInfo(t *testing.T) {
-	context := okteto.OktetoContext{
+	context := okteto.Context{
 		Namespace: "test",
 		Registry:  "registry.okteto",
 	}
 
-	namespaceEnvVar := model.BuildArg{
+	namespaceEnvVar := build.Arg{
 		Name: model.OktetoNamespaceEnvVar, Value: context.Namespace,
-	}
-
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": &context,
-		},
-		CurrentContext: "test",
 	}
 
 	serviceContext := "service"
@@ -130,6 +138,8 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 	defer func() {
 		require.NoError(t, os.Chdir(originalWd))
 	}()
+	dir, err := os.Getwd()
+	require.NoError(t, err)
 	require.NoError(t, os.Mkdir(serviceContext, os.ModePerm))
 
 	df := filepath.Join(serviceContext, serviceDockerfile)
@@ -142,18 +152,18 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 	}()
 
 	tests := []struct {
-		name        string
-		serviceName string
-		buildInfo   *model.BuildInfo
-		isOkteto    bool
-		mr          mockRegistry
+		buildInfo   *build.Info
 		initialOpts *types.BuildOptions
 		expected    *types.BuildOptions
+		name        string
+		serviceName string
+		mr          mockRegistry
+		isOkteto    bool
 	}{
 		{
 			name:        "is-okteto-empty-buildInfo",
 			serviceName: "service",
-			buildInfo:   &model.BuildInfo{},
+			buildInfo:   &build.Info{},
 			mr: mockRegistry{
 				isOktetoRegistry: true,
 				registry:         "okteto.dev",
@@ -169,7 +179,7 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 		{
 			name:        "not-okteto-empty-buildInfo",
 			serviceName: "service",
-			buildInfo:   &model.BuildInfo{},
+			buildInfo:   &build.Info{},
 			isOkteto:    false,
 			expected: &types.BuildOptions{
 				OutputMode: oktetoLog.TTYFormat,
@@ -179,12 +189,12 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 		{
 			name:        "is-okteto-missing-image-buildInfo",
 			serviceName: "service",
-			buildInfo: &model.BuildInfo{
+			buildInfo: &build.Info{
 				Context:    serviceContext,
 				Dockerfile: serviceDockerfile,
 				Target:     "build",
 				CacheFrom:  []string{"cache-image"},
-				Args: model.BuildArgs{
+				Args: build.Args{
 					{
 						Name:  "arg1",
 						Value: "value1",
@@ -203,7 +213,7 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 			expected: &types.BuildOptions{
 				OutputMode: oktetoLog.TTYFormat,
 				Tag:        "okteto.dev/movies-service:okteto",
-				File:       filepath.Join(serviceContext, serviceDockerfile),
+				File:       filepath.Join(dir, serviceContext, serviceDockerfile),
 				Target:     "build",
 				Path:       "service",
 				CacheFrom:  []string{"cache-image"},
@@ -213,18 +223,18 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 		{
 			name:        "is-okteto-missing-image-buildInfo-with-volumes",
 			serviceName: "service",
-			buildInfo: &model.BuildInfo{
+			buildInfo: &build.Info{
 				Context:    serviceContext,
 				Dockerfile: serviceDockerfile,
 				Target:     "build",
 				CacheFrom:  []string{"cache-image"},
-				Args: model.BuildArgs{
+				Args: build.Args{
 					{
 						Name:  "arg1",
 						Value: "value1",
 					},
 				},
-				VolumesToInclude: []model.StackVolume{
+				VolumesToInclude: []build.VolumeMounts{
 					{
 						LocalPath:  "a",
 						RemotePath: "b",
@@ -242,8 +252,8 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 			isOkteto: true,
 			expected: &types.BuildOptions{
 				OutputMode: oktetoLog.TTYFormat,
-				Tag:        "okteto.dev/movies-service:okteto-with-volume-mounts",
-				File:       filepath.Join(serviceContext, serviceDockerfile),
+				Tag:        "okteto.dev/movies-service:okteto",
+				File:       filepath.Join(dir, serviceContext, serviceDockerfile),
 				Target:     "build",
 				Path:       "service",
 				CacheFrom: []string{
@@ -255,13 +265,13 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 		{
 			name:        "is-okteto-has-image-buildInfo",
 			serviceName: "service",
-			buildInfo: &model.BuildInfo{
+			buildInfo: &build.Info{
 				Image:      "okteto.dev/mycustomimage:dev",
 				Context:    serviceContext,
 				Dockerfile: serviceDockerfile,
 				Target:     "build",
 				CacheFrom:  []string{"cache-image"},
-				Args: model.BuildArgs{
+				Args: build.Args{
 					namespaceEnvVar,
 					{
 						Name:  "arg1",
@@ -285,7 +295,7 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 			expected: &types.BuildOptions{
 				OutputMode: oktetoLog.TTYFormat,
 				Tag:        "okteto.dev/mycustomimage:dev",
-				File:       filepath.Join(serviceContext, serviceDockerfile),
+				File:       filepath.Join(dir, serviceContext, serviceDockerfile),
 				Target:     "build",
 				Path:       "service",
 				CacheFrom: []string{
@@ -301,7 +311,7 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 		{
 			name:        "has-platform-option",
 			serviceName: "service",
-			buildInfo:   &model.BuildInfo{},
+			buildInfo:   &build.Info{},
 			initialOpts: &types.BuildOptions{
 				Platform: "linux/amd64"},
 			isOkteto: true,
@@ -320,7 +330,7 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 		{
 			name:        "has-platform-option",
 			serviceName: "service",
-			buildInfo:   &model.BuildInfo{},
+			buildInfo:   &build.Info{},
 			initialOpts: &types.BuildOptions{
 				BuildArgs: []string{
 					"arg1=value1",
@@ -344,8 +354,8 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 		{
 			name:        "only key",
 			serviceName: "service",
-			buildInfo: &model.BuildInfo{
-				Args: model.BuildArgs{
+			buildInfo: &build.Info{
+				Args: build.Args{
 					{
 						Name:  "arg1",
 						Value: "value2",
@@ -375,23 +385,25 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			okteto.CurrentStore = &okteto.OktetoContextStore{
-				Contexts: map[string]*okteto.OktetoContext{
-					"test": {
-						Namespace: "test",
-						IsOkteto:  tt.isOkteto,
+			okCtx := &okteto.ContextStateless{
+				Store: &okteto.ContextStore{
+					Contexts: map[string]*okteto.Context{
+						"test": {
+							Namespace: "test",
+							IsOkteto:  tt.isOkteto,
+						},
 					},
+					CurrentContext: "test",
 				},
-				CurrentContext: "test",
 			}
 			manifest := &model.Manifest{
 				Name: "movies",
-				Build: model.ManifestBuild{
+				Build: build.ManifestBuild{
 					tt.serviceName: tt.buildInfo,
 				},
 			}
 
-			result := OptsFromBuildInfo(manifest.Name, tt.serviceName, manifest.Build[tt.serviceName], tt.initialOpts, &tt.mr)
+			result := OptsFromBuildInfo(manifest.Name, tt.serviceName, manifest.Build[tt.serviceName], tt.initialOpts, &tt.mr, okCtx)
 			require.Equal(t, tt.expected, result)
 		})
 	}
@@ -399,14 +411,13 @@ func Test_OptsFromBuildInfo(t *testing.T) {
 
 func TestOptsFromBuildInfoForRemoteDeploy(t *testing.T) {
 	tests := []struct {
-		name      string
-		buildInfo *model.BuildInfo
+		buildInfo *build.Info
 		expected  *types.BuildOptions
+		name      string
 	}{
 		{
 			name: "all fields set",
-			buildInfo: &model.BuildInfo{
-				Name:        "movies-service",
+			buildInfo: &build.Info{
 				Context:     "service",
 				Dockerfile:  "Dockerfile",
 				Target:      "build",
@@ -416,14 +427,13 @@ func TestOptsFromBuildInfoForRemoteDeploy(t *testing.T) {
 			},
 			expected: &types.BuildOptions{
 				File:       "Dockerfile",
-				OutputMode: "deploy",
+				OutputMode: DeployOutputModeOnBuild,
 				Path:       "service",
 			},
 		},
 		{
 			name: "just the fields needed",
-			buildInfo: &model.BuildInfo{
-				Name:        "movies-service",
+			buildInfo: &build.Info{
 				Context:     "service",
 				Dockerfile:  "Dockerfile",
 				Target:      "build",
@@ -433,14 +443,14 @@ func TestOptsFromBuildInfoForRemoteDeploy(t *testing.T) {
 			},
 			expected: &types.BuildOptions{
 				File:       "Dockerfile",
-				OutputMode: "deploy",
+				OutputMode: DeployOutputModeOnBuild,
 				Path:       "service",
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := OptsFromBuildInfoForRemoteDeploy(tt.buildInfo, &types.BuildOptions{OutputMode: "deploy"})
+			result := OptsFromBuildInfoForRemoteDeploy(tt.buildInfo, &types.BuildOptions{OutputMode: DeployOutputModeOnBuild})
 			require.Equal(t, tt.expected, result)
 		})
 	}
@@ -473,56 +483,87 @@ func TestExtractFromContextAndDockerfile(t *testing.T) {
 		dockerfile         string
 		fileExpected       string
 		optionalContext    string
-		dockerfilesCreated []string
 		expectedError      string
+		getWd              func() (string, error)
+		dockerfilesCreated []string
 	}{
 		{
-			name:               "dockerfile is abs path",
-			svcName:            "t1",
-			dockerfile:         filepath.Join(contextPath, "Dockerfile"),
-			fileExpected:       filepath.Join(contextPath, "Dockerfile"),
+			name:       "dockerfile is abs path",
+			svcName:    "t1",
+			dockerfile: filepath.Join(contextPath, "Dockerfile"),
+			getWd: func() (string, error) {
+				return filepath.Clean("/"), nil
+			},
+			fileExpected:       filepath.Clean(filepath.Join(contextPath, "Dockerfile")),
 			dockerfilesCreated: nil,
 			expectedError:      "",
 		},
 		{
-			name:               "dockerfile is NOT relative to context",
-			svcName:            "t2",
-			dockerfile:         "Dockerfile",
-			fileExpected:       "Dockerfile",
+			name:       "dockerfile is NOT relative to context",
+			svcName:    "t2",
+			dockerfile: "Dockerfile",
+			getWd: func() (string, error) {
+				return filepath.Clean("/"), nil
+			},
+			fileExpected:       filepath.Clean("Dockerfile"),
 			dockerfilesCreated: []string{"Dockerfile"},
 			expectedError:      fmt.Sprintf(warningDockerfilePath, "t2", "Dockerfile", buildName),
 		},
 		{
-			name:               "dockerfile in root and dockerfile in context path",
-			svcName:            "t3",
-			dockerfile:         "Dockerfile",
-			fileExpected:       filepath.Join(buildName, "Dockerfile"),
+			name:       "dockerfile in root and dockerfile in context path",
+			svcName:    "t3",
+			dockerfile: "Dockerfile",
+			getWd: func() (string, error) {
+				return filepath.Clean("/"), nil
+			},
+			fileExpected:       filepath.Clean(filepath.Join(filepath.Clean("/"), buildName, "Dockerfile")),
 			dockerfilesCreated: []string{"Dockerfile", filepath.Join(buildName, "Dockerfile")},
 			expectedError:      fmt.Sprintf(doubleDockerfileWarning, "t3", buildName, "Dockerfile"),
 		},
 		{
-			name:               "dockerfile is relative to context",
-			svcName:            "t4",
-			dockerfile:         "Dockerfile",
-			fileExpected:       filepath.Join(buildName, "Dockerfile"),
+			name:       "dockerfile is relative to context",
+			svcName:    "t4",
+			dockerfile: "Dockerfile",
+			getWd: func() (string, error) {
+				return filepath.Clean("/"), nil
+			},
+			fileExpected:       filepath.Clean(filepath.Join(filepath.Clean("/"), buildName, "Dockerfile")),
 			dockerfilesCreated: []string{filepath.Join(buildName, "Dockerfile")},
 			expectedError:      "",
 		},
 		{
-			name:               "one dockerfile in root no warning",
-			svcName:            "t5",
-			dockerfile:         "Dockerfile",
-			fileExpected:       "Dockerfile",
-			optionalContext:    ".",
+			name:            "one dockerfile in root no warning",
+			svcName:         "t5",
+			dockerfile:      "Dockerfile",
+			fileExpected:    filepath.Clean("/Dockerfile"),
+			optionalContext: ".",
+			getWd: func() (string, error) {
+				return filepath.Clean("/"), nil
+			},
 			dockerfilesCreated: []string{"Dockerfile"},
 			expectedError:      "",
 		},
 		{
-			name:               "dockerfile in root, not showing 2 dockerfiles warning",
-			svcName:            "t6",
-			dockerfile:         "./Dockerfile",
-			fileExpected:       "Dockerfile",
-			optionalContext:    ".",
+			name:            "dockerfile in root, not showing 2 dockerfiles warning",
+			svcName:         "t6",
+			dockerfile:      "./Dockerfile",
+			fileExpected:    filepath.Clean("/Dockerfile"),
+			optionalContext: ".",
+			getWd: func() (string, error) {
+				return filepath.Clean("/"), nil
+			},
+			dockerfilesCreated: []string{"Dockerfile"},
+			expectedError:      "",
+		},
+		{
+			name:            "dockerfile in folder, not showing 2 dockerfiles warning",
+			svcName:         "t7",
+			dockerfile:      "Dockerfile",
+			fileExpected:    filepath.Clean("/Dockerfile"),
+			optionalContext: ".",
+			getWd: func() (string, error) {
+				return filepath.Clean("/"), nil
+			},
 			dockerfilesCreated: []string{"Dockerfile"},
 			expectedError:      "",
 		},
@@ -559,7 +600,7 @@ func TestExtractFromContextAndDockerfile(t *testing.T) {
 				contextTest = tt.optionalContext
 			}
 
-			file := extractFromContextAndDockerfile(contextTest, tt.dockerfile, tt.svcName)
+			file := extractFromContextAndDockerfile(contextTest, tt.dockerfile, tt.svcName, tt.getWd)
 			warningErr := strings.TrimSuffix(buf.String(), "\n")
 
 			if warningErr != "" && tt.expectedError == "" {
@@ -597,10 +638,10 @@ func Test_replaceSecretsSourceEnvWithTempFile(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name                    string
 		fs                      afero.Fs
-		secretTempFolder        string
 		buildOptions            *types.BuildOptions
+		name                    string
+		secretTempFolder        string
 		expectedErr             bool
 		expectedReplacedSecrets bool
 	}{
@@ -665,7 +706,9 @@ func Test_replaceSecretsSourceEnvWithTempFile(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
 			initialSecrets := make([]string, len(tt.buildOptions.Secrets))
 			copy(initialSecrets, tt.buildOptions.Secrets)
@@ -727,39 +770,6 @@ func Test_createTempFileWithExpandedEnvsAtSource(t *testing.T) {
 
 			require.Contains(t, string(f), "value of env")
 		})
-	}
-}
-
-func Test_translateDockerErr(t *testing.T) {
-	tests := []struct {
-		name        string
-		input       error
-		expectedErr error
-	}{
-		{
-			name:        "err is nil",
-			input:       nil,
-			expectedErr: nil,
-		},
-		{
-			name:        "err is docker error",
-			input:       fmt.Errorf("failed to dial gRPC: cannot connect to the Docker daemon"),
-			expectedErr: errDockerDaemonConnection,
-		},
-		{
-			name:        "err is not docker error",
-			input:       assert.AnError,
-			expectedErr: assert.AnError,
-		},
-	}
-
-	for _, tt := range tests {
-
-		t.Run(tt.name, func(t *testing.T) {
-			got := translateDockerErr(tt.input)
-			require.Equal(t, tt.expectedErr, got)
-		})
-
 	}
 }
 

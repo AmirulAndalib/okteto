@@ -36,9 +36,9 @@ func TestDeployPreview(t *testing.T) {
 		err      error
 	}
 	testCases := []struct {
+		expected expected
 		name     string
 		input    input
-		expected expected
 	}{
 		{
 			name: "namespace validator length exceeds",
@@ -240,9 +240,9 @@ func TestDestroyPreview(t *testing.T) {
 		err error
 	}
 	testCases := []struct {
-		name     string
-		input    input
 		expected expected
+		input    input
+		name     string
 	}{
 		{
 			name: "no error",
@@ -292,13 +292,13 @@ func TestListPreview(t *testing.T) {
 		labels []string
 	}
 	type expected struct {
-		response []types.Preview
 		err      error
+		response []types.Preview
 	}
 	testCases := []struct {
 		name     string
-		input    input
 		expected expected
+		input    input
 	}{
 		{
 			name: "no error",
@@ -310,6 +310,7 @@ func TestListPreview(t *testing.T) {
 								Id:       "test",
 								Sleeping: false,
 								Scope:    "test",
+								Branch:   "test-branch",
 							},
 						},
 					},
@@ -323,6 +324,7 @@ func TestListPreview(t *testing.T) {
 						Sleeping:      false,
 						Scope:         "test",
 						PreviewLabels: []string{},
+						Branch:        "test-branch",
 					},
 				},
 				err: nil,
@@ -342,6 +344,7 @@ func TestListPreview(t *testing.T) {
 								PreviewLabels: []graphql.String{
 									"value",
 								},
+								Branch: "test-branch",
 							},
 						},
 					},
@@ -357,6 +360,7 @@ func TestListPreview(t *testing.T) {
 						PreviewLabels: []string{
 							"value",
 						},
+						Branch: "test-branch",
 					},
 				},
 				err: nil,
@@ -418,12 +422,12 @@ func TestDeprecatedListPreview(t *testing.T) {
 		client *fakeGraphQLClient
 	}
 	type expected struct {
-		response []types.Preview
 		err      error
+		response []types.Preview
 	}
 	testCases := []struct {
-		name     string
 		input    input
+		name     string
 		expected expected
 	}{
 		{
@@ -478,18 +482,18 @@ func TestDeprecatedListPreview(t *testing.T) {
 	}
 }
 
-func TestListEndpoints(t *testing.T) {
+func TestListPreviewEndpoints(t *testing.T) {
 	type input struct {
 		client *fakeGraphQLClient
 		name   string
 	}
 	type expected struct {
-		response []types.Endpoint
 		err      error
+		response []types.Endpoint
 	}
 	testCases := []struct {
-		name     string
 		input    input
+		name     string
 		expected expected
 	}{
 		{
@@ -607,9 +611,9 @@ func TestGetResourcesStatus(t *testing.T) {
 		err      error
 	}
 	testCases := []struct {
-		name     string
 		input    input
 		expected expected
+		name     string
 	}{
 		{
 			name: "error",
@@ -859,9 +863,9 @@ func TestTranslatePreviewErr(t *testing.T) {
 		err error
 	}
 	testCases := []struct {
-		name     string
-		input    input
 		expected expected
+		input    input
+		name     string
 	}{
 		{
 			name: "another error",
@@ -901,6 +905,61 @@ func TestTranslatePreviewErr(t *testing.T) {
 			pc := previewClient{}
 			err := pc.translateErr(tc.input.err, tc.input.name)
 			assert.ErrorIs(t, err, tc.expected.err)
+		})
+	}
+}
+
+func TestGetPreview(t *testing.T) {
+	type input struct {
+		client *fakeGraphQLClient
+	}
+	type expected struct {
+		err    error
+		result *types.Preview
+	}
+	testCases := []struct {
+		expected expected
+		cfg      input
+		name     string
+	}{
+		{
+			name: "error in graphql",
+			cfg: input{
+				client: &fakeGraphQLClient{
+					err: assert.AnError,
+				},
+			},
+			expected: expected{
+				err: assert.AnError,
+			},
+		},
+		{
+			name: "graphql response is an preview",
+			cfg: input{
+				client: &fakeGraphQLClient{
+					queryResult: &getPreviewQuery{
+						Response: previewIDStruct{
+							Id: "test",
+						},
+					},
+				},
+			},
+			expected: expected{
+				result: &types.Preview{
+					ID: "test",
+				},
+				err: nil,
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pc := &previewClient{
+				client: tc.cfg.client,
+			}
+			p, err := pc.Get(context.Background(), "")
+			assert.ErrorIs(t, err, tc.expected.err)
+			assert.Equal(t, tc.expected.result, p)
 		})
 	}
 }

@@ -20,8 +20,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/okteto/okteto/pkg/build"
+	"github.com/okteto/okteto/pkg/config"
+	"github.com/okteto/okteto/pkg/env"
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -29,6 +34,18 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/pointer"
 )
+
+const modifiedHostName = "modified.test.hostname"
+
+type fakeDivert struct {
+	called bool
+}
+
+func (f *fakeDivert) UpdatePod(spec apiv1.PodSpec) apiv1.PodSpec {
+	f.called = true
+	spec.Hostname = modifiedHostName
+	return spec
+}
 
 func Test_translateConfigMap(t *testing.T) {
 	s := &model.Stack{
@@ -56,6 +73,7 @@ func Test_translateConfigMap(t *testing.T) {
 }
 
 func Test_translateDeployment(t *testing.T) {
+	divert := &fakeDivert{}
 	s := &model.Stack{
 		Name: "stackName",
 		Services: map[string]*model.Service{
@@ -77,7 +95,7 @@ func Test_translateDeployment(t *testing.T) {
 				StopGracePeriod: 20,
 				Entrypoint:      model.Entrypoint{Values: []string{"command1", "command2"}},
 				Command:         model.Command{Values: []string{"args1", "args2"}},
-				Environment: []model.EnvVar{
+				Environment: []env.Var{
 					{
 						Name:  "env1",
 						Value: "value1",
@@ -91,7 +109,7 @@ func Test_translateDeployment(t *testing.T) {
 			},
 		},
 	}
-	result := translateDeployment("svcName", s)
+	result := translateDeployment("svcName", s, divert)
 	if result.Name != "svcName" {
 		t.Errorf("Wrong deployment name: '%s'", result.Name)
 	}
@@ -100,11 +118,13 @@ func Test_translateDeployment(t *testing.T) {
 		"label2":                    "value2",
 		model.StackNameLabel:        "stackname",
 		model.StackServiceNameLabel: "svcName",
+		model.DeployedByLabel:       "stackname",
 	}
 	assert.Equal(t, result.Labels, labels)
 	annotations := map[string]string{
-		"annotation1": "value1",
-		"annotation2": "value2",
+		"annotation1":           "value1",
+		"annotation2":           "value2",
+		"dev.okteto.com/sample": "true",
 	}
 	assert.Equal(t, result.Annotations, annotations)
 	nodeSelector := map[string]string{
@@ -160,9 +180,13 @@ func Test_translateDeployment(t *testing.T) {
 		t.Errorf("Wrong container.resources: '%v'", c.Resources)
 	}
 
+	require.Equal(t, modifiedHostName, result.Spec.Template.Spec.Hostname)
+	require.True(t, divert.called)
+
 }
 
 func Test_translateStatefulSet(t *testing.T) {
+	divert := &fakeDivert{}
 	s := &model.Stack{
 		Name: "stackName",
 		Services: map[string]*model.Service{
@@ -184,7 +208,7 @@ func Test_translateStatefulSet(t *testing.T) {
 				StopGracePeriod: 20,
 				Entrypoint:      model.Entrypoint{Values: []string{"command1", "command2"}},
 				Command:         model.Command{Values: []string{"args1", "args2"}},
-				Environment: []model.EnvVar{
+				Environment: []env.Var{
 					{
 						Name:  "env1",
 						Value: "value1",
@@ -198,7 +222,7 @@ func Test_translateStatefulSet(t *testing.T) {
 				CapAdd:  []apiv1.Capability{apiv1.Capability("CAP_ADD")},
 				CapDrop: []apiv1.Capability{apiv1.Capability("CAP_DROP")},
 
-				Volumes: []model.StackVolume{{RemotePath: "/volume1"}, {RemotePath: "/volume2"}},
+				Volumes: []build.VolumeMounts{{RemotePath: "/volume1"}, {RemotePath: "/volume2"}},
 				Resources: &model.StackResources{
 					Limits: model.ServiceResources{
 						CPU:    model.Quantity{Value: resource.MustParse("100m")},
@@ -214,7 +238,7 @@ func Test_translateStatefulSet(t *testing.T) {
 			},
 		},
 	}
-	result := translateStatefulSet("svcName", s)
+	result := translateStatefulSet("svcName", s, divert)
 	if result.Name != "svcName" {
 		t.Errorf("Wrong statefulset name: '%s'", result.Name)
 	}
@@ -223,11 +247,13 @@ func Test_translateStatefulSet(t *testing.T) {
 		"label2":                    "value2",
 		model.StackNameLabel:        "stackname",
 		model.StackServiceNameLabel: "svcName",
+		model.DeployedByLabel:       "stackname",
 	}
 	assert.Equal(t, labels, result.Labels)
 	annotations := map[string]string{
-		"annotation1": "value1",
-		"annotation2": "value2",
+		"annotation1":           "value1",
+		"annotation2":           "value2",
+		"dev.okteto.com/sample": "true",
 	}
 	assert.Equal(t, result.Annotations, annotations)
 	nodeSelector := map[string]string{
@@ -235,7 +261,6 @@ func Test_translateStatefulSet(t *testing.T) {
 		"node2": "value2",
 	}
 	assert.Equal(t, result.Spec.Template.Spec.NodeSelector, nodeSelector)
-
 	if *result.Spec.Replicas != 3 {
 		t.Errorf("Wrong statefulset spec.replicas: '%d'", *result.Spec.Replicas)
 	}
@@ -254,9 +279,10 @@ func Test_translateStatefulSet(t *testing.T) {
 		t.Errorf("Wrong statefulset spec.template.spec.termination_grade_period_seconds: '%d'", *result.Spec.Template.Spec.TerminationGracePeriodSeconds)
 	}
 	initContainer := apiv1.Container{
-		Name:    fmt.Sprintf("init-%s", "svcName"),
-		Image:   "busybox",
-		Command: []string{"sh", "-c", "chmod 777 /data"},
+		Name:            fmt.Sprintf("init-%s", "svcName"),
+		Image:           config.NewImageConfig(io.NewIOController()).GetOktetoImage(),
+		Command:         []string{"sh", "-c", "chmod 777 /data"},
+		ImagePullPolicy: apiv1.PullIfNotPresent,
 		VolumeMounts: []apiv1.VolumeMount{
 			{
 				MountPath: "/data",
@@ -355,15 +381,19 @@ func Test_translateStatefulSet(t *testing.T) {
 				"storage": resource.MustParse("20Gi"),
 			},
 		},
-		StorageClassName: pointer.StringPtr("class-name"),
+		StorageClassName: pointer.String("class-name"),
 	}
 	if !reflect.DeepEqual(vct.Spec, volumeClaimTemplateSpec) {
 		t.Errorf("Wrong statefulset volume claim template: '%v'", vct.Spec)
 	}
 
+	require.Equal(t, modifiedHostName, result.Spec.Template.Spec.Hostname)
+	require.True(t, divert.called)
+
 }
 
 func Test_translateJobWithoutVolumes(t *testing.T) {
+	divert := &fakeDivert{}
 	s := &model.Stack{
 		Name: "stackName",
 		Services: map[string]*model.Service{
@@ -385,7 +415,7 @@ func Test_translateJobWithoutVolumes(t *testing.T) {
 				Replicas:        3,
 				Entrypoint:      model.Entrypoint{Values: []string{"command1", "command2"}},
 				Command:         model.Command{Values: []string{"args1", "args2"}},
-				Environment: []model.EnvVar{
+				Environment: []env.Var{
 					{
 						Name:  "env1",
 						Value: "value1",
@@ -415,7 +445,7 @@ func Test_translateJobWithoutVolumes(t *testing.T) {
 			},
 		},
 	}
-	result := translateJob("svcName", s)
+	result := translateJob("svcName", s, divert)
 	if result.Name != "svcName" {
 		t.Errorf("Wrong job name: '%s'", result.Name)
 	}
@@ -424,11 +454,13 @@ func Test_translateJobWithoutVolumes(t *testing.T) {
 		"label2":                    "value2",
 		model.StackNameLabel:        "stackname",
 		model.StackServiceNameLabel: "svcName",
+		model.DeployedByLabel:       "stackname",
 	}
 	assert.Equal(t, labels, result.Labels)
 	annotations := map[string]string{
-		"annotation1": "value1",
-		"annotation2": "value2",
+		"annotation1":           "value1",
+		"annotation2":           "value2",
+		"dev.okteto.com/sample": "true",
 	}
 	assert.Equal(t, result.Annotations, annotations)
 	nodeSelector := map[string]string{
@@ -499,9 +531,13 @@ func Test_translateJobWithoutVolumes(t *testing.T) {
 	if len(c.VolumeMounts) > 0 {
 		t.Errorf("Wrong c.VolumeMounts: '%d'", len(c.VolumeMounts))
 	}
+
+	require.Equal(t, modifiedHostName, result.Spec.Template.Spec.Hostname)
+	require.True(t, divert.called)
 }
 
 func Test_translateJobWithVolumes(t *testing.T) {
+	divert := &fakeDivert{}
 	s := &model.Stack{
 		Name: "stackName",
 		Services: map[string]*model.Service{
@@ -523,7 +559,7 @@ func Test_translateJobWithVolumes(t *testing.T) {
 				Replicas:        3,
 				Entrypoint:      model.Entrypoint{Values: []string{"command1", "command2"}},
 				Command:         model.Command{Values: []string{"args1", "args2"}},
-				Environment: []model.EnvVar{
+				Environment: []env.Var{
 					{
 						Name:  "env1",
 						Value: "value1",
@@ -538,7 +574,7 @@ func Test_translateJobWithVolumes(t *testing.T) {
 				CapDrop:       []apiv1.Capability{apiv1.Capability("CAP_DROP")},
 				RestartPolicy: apiv1.RestartPolicyNever,
 				BackOffLimit:  5,
-				Volumes:       []model.StackVolume{{RemotePath: "/volume1"}, {RemotePath: "/volume2"}},
+				Volumes:       []build.VolumeMounts{{RemotePath: "/volume1"}, {RemotePath: "/volume2"}},
 				Resources: &model.StackResources{
 					Limits: model.ServiceResources{
 						CPU:    model.Quantity{Value: resource.MustParse("100m")},
@@ -554,7 +590,7 @@ func Test_translateJobWithVolumes(t *testing.T) {
 			},
 		},
 	}
-	result := translateJob("svcName", s)
+	result := translateJob("svcName", s, divert)
 	if result.Name != "svcName" {
 		t.Errorf("Wrong job name: '%s'", result.Name)
 	}
@@ -563,11 +599,13 @@ func Test_translateJobWithVolumes(t *testing.T) {
 		"label2":                    "value2",
 		model.StackNameLabel:        "stackname",
 		model.StackServiceNameLabel: "svcName",
+		model.DeployedByLabel:       "stackname",
 	}
 	assert.Equal(t, labels, result.Labels)
 	annotations := map[string]string{
-		"annotation1": "value1",
-		"annotation2": "value2",
+		"annotation1":           "value1",
+		"annotation2":           "value2",
+		"dev.okteto.com/sample": "true",
 	}
 	assert.Equal(t, result.Annotations, annotations)
 	nodeSelector := map[string]string{
@@ -597,9 +635,10 @@ func Test_translateJobWithVolumes(t *testing.T) {
 		t.Errorf("Wrong job spec.template.spec.termination_grade_period_seconds: '%d'", *result.Spec.Template.Spec.TerminationGracePeriodSeconds)
 	}
 	initContainer := apiv1.Container{
-		Name:    fmt.Sprintf("init-%s", "svcName"),
-		Image:   "busybox",
-		Command: []string{"sh", "-c", "chmod 777 /data"},
+		Name:            fmt.Sprintf("init-%s", "svcName"),
+		Image:           config.NewImageConfig(io.NewIOController()).GetOktetoImage(),
+		ImagePullPolicy: apiv1.PullIfNotPresent,
+		Command:         []string{"sh", "-c", "chmod 777 /data"},
 		VolumeMounts: []apiv1.VolumeMount{
 			{
 				MountPath: "/data",
@@ -685,14 +724,17 @@ func Test_translateJobWithVolumes(t *testing.T) {
 	if !reflect.DeepEqual(c.VolumeMounts, volumeMounts) {
 		t.Errorf("Wrong container.volume_mounts: '%v'", c.VolumeMounts)
 	}
+
+	require.Equal(t, modifiedHostName, result.Spec.Template.Spec.Hostname)
+	require.True(t, divert.called)
 }
 
 func Test_translateService(t *testing.T) {
 
 	var tests = []struct {
-		name     string
 		stack    *model.Stack
 		expected *apiv1.Service
+		name     string
 	}{
 		{
 			name: "translate svc no public endpoints",
@@ -730,10 +772,12 @@ func Test_translateService(t *testing.T) {
 						"label2":                    "value2",
 						model.StackNameLabel:        "stackname",
 						model.StackServiceNameLabel: "svcName",
+						model.DeployedByLabel:       "stackname",
 					},
 					Annotations: map[string]string{
-						"annotation1": "value1",
-						"annotation2": "value2",
+						"annotation1":           "value1",
+						"annotation2":           "value2",
+						"dev.okteto.com/sample": "true",
 					},
 				},
 				Spec: apiv1.ServiceSpec{
@@ -804,11 +848,13 @@ func Test_translateService(t *testing.T) {
 						"label2":                    "value2",
 						model.StackNameLabel:        "stackname",
 						model.StackServiceNameLabel: "svcName",
+						model.DeployedByLabel:       "stackname",
 					},
 					Annotations: map[string]string{
 						"annotation1":                     "value1",
 						"annotation2":                     "value2",
 						model.OktetoAutoIngressAnnotation: "true",
+						"dev.okteto.com/sample":           "true",
 					},
 				},
 				Spec: apiv1.ServiceSpec{
@@ -877,11 +923,13 @@ func Test_translateService(t *testing.T) {
 						"label2":                    "value2",
 						model.StackNameLabel:        "stackname",
 						model.StackServiceNameLabel: "svcName",
+						model.DeployedByLabel:       "stackname",
 					},
 					Annotations: map[string]string{
 						"annotation1":                     "value1",
 						"annotation2":                     "value2",
 						model.OktetoAutoIngressAnnotation: "private",
+						"dev.okteto.com/sample":           "true",
 					},
 				},
 				Spec: apiv1.ServiceSpec{
@@ -950,11 +998,13 @@ func Test_translateService(t *testing.T) {
 						"label2":                    "value2",
 						model.StackNameLabel:        "stackname",
 						model.StackServiceNameLabel: "svcName",
+						model.DeployedByLabel:       "stackname",
 					},
 					Annotations: map[string]string{
 						"annotation1":                    "value1",
 						"annotation2":                    "value2",
 						model.OktetoPrivateSvcAnnotation: "true",
+						"dev.okteto.com/sample":          "true",
 					},
 				},
 				Spec: apiv1.ServiceSpec{
@@ -1018,10 +1068,12 @@ func Test_translateService(t *testing.T) {
 						"label2":                    "value2",
 						model.StackNameLabel:        "stackname",
 						model.StackServiceNameLabel: "svcName",
+						model.DeployedByLabel:       "stackname",
 					},
 					Annotations: map[string]string{
-						"annotation1": "value1",
-						"annotation2": "value2",
+						"annotation1":           "value1",
+						"annotation2":           "value2",
+						"dev.okteto.com/sample": "true",
 					},
 				},
 				Spec: apiv1.ServiceSpec{
@@ -1054,9 +1106,9 @@ func Test_translateService(t *testing.T) {
 
 func Test_translateSvcProbe(t *testing.T) {
 	tests := []struct {
-		name     string
-		svc      *model.Service
 		expected healthcheckProbes
+		svc      *model.Service
+		name     string
 	}{
 		{
 			name: "nil healthcheck",
@@ -1203,15 +1255,15 @@ func Test_translateServiceEnvironment(t *testing.T) {
 		{
 			name: "none",
 			svc: &model.Service{
-				Environment: model.Environment{},
+				Environment: env.Environment{},
 			},
 			expected: []apiv1.EnvVar{},
 		},
 		{
 			name: "empty value",
 			svc: &model.Service{
-				Environment: model.Environment{
-					model.EnvVar{
+				Environment: env.Environment{
+					env.Var{
 						Name: "DEBUG",
 					},
 				},
@@ -1225,8 +1277,8 @@ func Test_translateServiceEnvironment(t *testing.T) {
 		{
 			name: "empty name",
 			svc: &model.Service{
-				Environment: model.Environment{
-					model.EnvVar{
+				Environment: env.Environment{
+					env.Var{
 						Value: "DEBUG",
 					},
 				},
@@ -1236,8 +1288,8 @@ func Test_translateServiceEnvironment(t *testing.T) {
 		{
 			name: "ok env var",
 			svc: &model.Service{
-				Environment: model.Environment{
-					model.EnvVar{
+				Environment: env.Environment{
+					env.Var{
 						Name:  "DEBUG",
 						Value: "true",
 					},
@@ -1264,8 +1316,8 @@ func Test_translateServiceEnvironment(t *testing.T) {
 
 func Test_translateResources(t *testing.T) {
 	tests := []struct {
-		name      string
 		svc       *model.Service
+		name      string
 		resources apiv1.ResourceRequirements
 	}{
 		{
@@ -1409,21 +1461,22 @@ func Test_translateResources(t *testing.T) {
 
 func Test_translateAffinity(t *testing.T) {
 	tests := []struct {
-		name     string
-		svc      *model.Service
-		affinity *apiv1.Affinity
+		svc                   *model.Service
+		affinity              *apiv1.Affinity
+		name                  string
+		disableVolumeAffinity bool
 	}{
 		{
 			name: "none",
 			svc: &model.Service{
-				Environment: model.Environment{},
+				Environment: env.Environment{},
 			},
 			affinity: nil,
 		},
 		{
 			name: "only volume mounts",
 			svc: &model.Service{
-				VolumeMounts: []model.StackVolume{
+				VolumeMounts: []build.VolumeMounts{
 					{
 						LocalPath:  "",
 						RemotePath: "/var",
@@ -1435,7 +1488,7 @@ func Test_translateAffinity(t *testing.T) {
 		{
 			name: "one volume",
 			svc: &model.Service{
-				Volumes: []model.StackVolume{
+				Volumes: []build.VolumeMounts{
 					{
 						LocalPath:  "test",
 						RemotePath: "/var",
@@ -1463,7 +1516,7 @@ func Test_translateAffinity(t *testing.T) {
 		{
 			name: "multiple volumes",
 			svc: &model.Service{
-				Volumes: []model.StackVolume{
+				Volumes: []build.VolumeMounts{
 					{
 						LocalPath:  "test-1",
 						RemotePath: "/var",
@@ -1518,23 +1571,45 @@ func Test_translateAffinity(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "multiple volumes with volume affinity disabled",
+			svc: &model.Service{
+				Volumes: []build.VolumeMounts{
+					{
+						LocalPath:  "test-1",
+						RemotePath: "/var",
+					},
+					{
+						LocalPath:  "test-2",
+						RemotePath: "/var",
+					},
+					{
+						LocalPath:  "test-3",
+						RemotePath: "/var",
+					},
+				},
+			},
+			disableVolumeAffinity: true,
+			affinity:              nil,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			aff := translateAffinity(tt.svc)
-			if !reflect.DeepEqual(tt.affinity, aff) {
-				t.Fatal("Wrong translation")
+			if tt.disableVolumeAffinity {
+				t.Setenv(oktetoComposeVolumeAffinityEnabledEnvVar, "false")
 			}
+			aff := translateAffinity(tt.svc)
+			assert.Equal(t, tt.affinity, aff)
 		})
 	}
 }
 
 func TestGetSvcPublicPorts(t *testing.T) {
 	tests := []struct {
+		stack          *model.Stack
 		name           string
 		svcName        string
-		stack          *model.Stack
 		expectedLength int
 	}{
 		{
@@ -1618,10 +1693,10 @@ func TestGetSvcPublicPorts(t *testing.T) {
 
 func TestGetDeploymentStrategy(t *testing.T) {
 	tests := []struct {
-		name     string
+		expected appsv1.DeploymentStrategy
 		svc      *model.Service
 		envs     map[string]string
-		expected appsv1.DeploymentStrategy
+		name     string
 	}{
 		{
 			name: "default",
@@ -1733,10 +1808,10 @@ func TestGetDeploymentStrategy(t *testing.T) {
 
 func TestGetStrategyStrategy(t *testing.T) {
 	tests := []struct {
-		name     string
+		expected appsv1.StatefulSetUpdateStrategy
 		svc      *model.Service
 		envs     map[string]string
-		expected appsv1.StatefulSetUpdateStrategy
+		name     string
 	}{
 		{
 			name: "default",

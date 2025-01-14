@@ -20,12 +20,10 @@ import (
 	"strings"
 
 	"github.com/okteto/okteto/pkg/constants"
-	"github.com/okteto/okteto/pkg/model"
-
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/model"
 	apiv1 "k8s.io/api/core/v1"
 	resource "k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 )
 
@@ -94,17 +92,16 @@ func (tr *Translation) translate() error {
 	if tr.MainDev == tr.Dev {
 		tr.DevApp.SetReplicas(1)
 		tr.DevApp.TemplateObjectMeta().Labels[model.InteractiveDevLabel] = tr.getDevName()
-		TranslateOktetoSyncSecret(tr.DevApp.PodSpec(), tr.Dev.Name)
+		TranslateOktetoSyncthingVolumes(tr.DevApp.PodSpec(), tr.Dev.Name)
 	} else {
 		if tr.Dev.Replicas != nil {
 			tr.DevApp.SetReplicas(int32(*tr.Dev.Replicas))
 		}
 
 		tr.DevApp.TemplateObjectMeta().Labels[model.DetachedDevLabel] = tr.getDevName()
-		TranslatePodAffinity(tr.DevApp.PodSpec(), tr.MainDev.Name)
 	}
 
-	tr.DevApp.PodSpec().TerminationGracePeriodSeconds = pointer.Int64Ptr(0)
+	tr.DevApp.PodSpec().TerminationGracePeriodSeconds = pointer.Int64(0)
 
 	for _, rule := range tr.Rules {
 		devContainer := GetDevContainer(tr.DevApp.PodSpec(), rule.Container)
@@ -161,30 +158,6 @@ func TranslateDevTolerations(spec *apiv1.PodSpec, tolerations []apiv1.Toleration
 	spec.Tolerations = append(spec.Tolerations, tolerations...)
 }
 
-// TranslatePodAffinity translates the affinity of pod to be all on the same node
-func TranslatePodAffinity(spec *apiv1.PodSpec, name string) {
-	if spec.Affinity == nil {
-		spec.Affinity = &apiv1.Affinity{}
-	}
-	if spec.Affinity.PodAffinity == nil {
-		spec.Affinity.PodAffinity = &apiv1.PodAffinity{}
-	}
-	if spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
-		spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = []apiv1.PodAffinityTerm{}
-	}
-	spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
-		spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
-		apiv1.PodAffinityTerm{
-			LabelSelector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					model.InteractiveDevLabel: name,
-				},
-			},
-			TopologyKey: "kubernetes.io/hostname",
-		},
-	)
-}
-
 // TranslateDevContainer translates a dev container
 func TranslateDevContainer(c *apiv1.Container, rule *model.TranslationRule) {
 	c.Image = rule.Image
@@ -212,6 +185,7 @@ func TranslatePodSpec(podSpec *apiv1.PodSpec, rule *model.TranslationRule) {
 	TranslateOktetoVolumes(podSpec, rule)
 	TranslatePodSecurityContext(podSpec, rule.SecurityContext)
 	TranslatePodServiceAccount(podSpec, rule.ServiceAccount)
+	TranslatePodPriorityClassName(podSpec, rule.PriorityClassName)
 
 	TranslateOktetoNodeSelector(podSpec, rule.NodeSelector)
 	TranslateOktetoAffinity(podSpec, rule.Affinity)
@@ -238,43 +212,89 @@ func TranslateLifecycle(c *apiv1.Container, l *model.Lifecycle) {
 	if l == nil {
 		return
 	}
-	if c.Lifecycle == nil {
+	setPostStart(c, l)
+	setPreStop(c, l)
+	if c.Lifecycle != nil && c.Lifecycle.PostStart == nil && c.Lifecycle.PreStop == nil {
+		c.Lifecycle = nil
+	}
+}
+
+func setPostStart(c *apiv1.Container, l *model.Lifecycle) {
+	if l.PostStart == nil {
 		return
 	}
-	if !l.PostStart {
-		c.Lifecycle.PostStart = nil
+	if c.Lifecycle == nil {
+		c.Lifecycle = &apiv1.Lifecycle{}
 	}
-	if !l.PostStart {
+	if !l.PostStart.Enabled {
 		c.Lifecycle.PostStart = nil
+		return
+	}
+	if len(l.PostStart.Command.Values) == 0 {
+		return
+	}
+
+	c.Lifecycle.PostStart = &apiv1.LifecycleHandler{
+		Exec: &apiv1.ExecAction{
+			Command: l.PostStart.Command.Values,
+		},
+	}
+}
+
+func setPreStop(c *apiv1.Container, l *model.Lifecycle) {
+	if l.PreStop == nil {
+		return
+	}
+	if c.Lifecycle == nil {
+		c.Lifecycle = &apiv1.Lifecycle{}
+	}
+	if !l.PreStop.Enabled {
+		c.Lifecycle.PreStop = nil
+		return
+	}
+	if len(l.PreStop.Command.Values) == 0 {
+		return
+	}
+
+	c.Lifecycle.PreStop = &apiv1.LifecycleHandler{
+		Exec: &apiv1.ExecAction{
+			Command: l.PreStop.Command.Values,
+		},
 	}
 }
 
 // TranslateResources translates the resources attached to a container
-func TranslateResources(c *apiv1.Container, rr model.ResourceRequirements) {
+func TranslateResources(container *apiv1.Container, ruleResource model.ResourceRequirements) {
+	ruleResourceList := []model.ResourceList{ruleResource.Requests, ruleResource.Limits}
+	containerResourceList := []*apiv1.ResourceList{&container.Resources.Requests, &container.Resources.Limits}
+	resourceTypes := []apiv1.ResourceName{apiv1.ResourceMemory, apiv1.ResourceCPU}
 
-	rrl := []model.ResourceList{rr.Requests, rr.Limits}
-	cr := []*apiv1.ResourceList{&c.Resources.Requests, &c.Resources.Limits}
+	for i, ruleResource := range ruleResourceList {
+		containerResource := containerResourceList[i]
 
-	for i, crl := range cr {
-		rl := rrl[i]
+		if *containerResource == nil {
+			(*containerResource) = apiv1.ResourceList{}
+		}
 
-		if *crl == nil {
-			*crl = make(map[apiv1.ResourceName]resource.Quantity)
+		for _, resource := range resourceTypes {
+			if v, ok := ruleResource[resource]; ok {
+				(*containerResource)[resource] = v
+			} else {
+				delete((*containerResource), resource)
+			}
 		}
-		if v, ok := rl[apiv1.ResourceMemory]; ok {
-			(*crl)[apiv1.ResourceMemory] = v
-		}
-		if v, ok := rl[apiv1.ResourceCPU]; ok {
-			(*crl)[apiv1.ResourceCPU] = v
-		}
-		if v, ok := rl[apiv1.ResourceEphemeralStorage]; ok {
-			(*crl)[apiv1.ResourceEphemeralStorage] = v
+		// If we set ephemeralStorage to empty, the pod will be restarted by the kubelet
+		if v, ok := ruleResource[apiv1.ResourceEphemeralStorage]; ok {
+			(*containerResource)[apiv1.ResourceEphemeralStorage] = v
+		} else {
+			delete((*containerResource), apiv1.ResourceEphemeralStorage)
 		}
 
 		// Device Plugin resources (amd.com/gpu, nvidia.com/gpu, squat.ai/fuse etc.)
-		for resname, v := range rl {
+		// ruleResource=map[apiv1.ResourceName]resource.Quantity
+		for resname, v := range ruleResource {
 			if strings.Contains(string(resname), "/") {
-				(*crl)[resname] = v
+				(*containerResource)[resname] = v
 			}
 		}
 	}
@@ -324,8 +344,10 @@ func TranslateVolumeMounts(c *apiv1.Container, rule *model.TranslationRule) {
 		apiv1.VolumeMount{
 			Name:      oktetoSyncSecretVolume,
 			MountPath: "/var/syncthing/secret/",
+			ReadOnly:  true,
 		},
 	)
+
 	if len(rule.Secrets) > 0 {
 		c.VolumeMounts = append(
 			c.VolumeMounts,
@@ -432,6 +454,13 @@ func TranslatePodServiceAccount(spec *apiv1.PodSpec, sa string) {
 	}
 }
 
+// TranslatePodPriorityClassName translates the priority class the pod uses
+func TranslatePodPriorityClassName(spec *apiv1.PodSpec, pc string) {
+	if pc != "" {
+		spec.PriorityClassName = pc
+	}
+}
+
 // TranslateContainerSecurityContext translates the security context attached to a container
 func TranslateContainerSecurityContext(c *apiv1.Container, s *model.SecurityContext) {
 	if s == nil {
@@ -492,7 +521,7 @@ func TranslateOktetoInitBinContainer(rule *model.TranslationRule, spec *apiv1.Po
 		Name:            OktetoBinName,
 		Image:           initContainer.Image,
 		ImagePullPolicy: apiv1.PullIfNotPresent,
-		Command:         []string{"sh", "-c", "cp /usr/local/bin/* /okteto/bin"},
+		Command:         []string{"sh", "-c", "cp /usr/bin-image/bin/* /okteto/bin"},
 		VolumeMounts: []apiv1.VolumeMount{
 			{
 				Name:      OktetoBinName,
@@ -556,44 +585,53 @@ func TranslateOktetoInitFromImageContainer(spec *apiv1.PodSpec, rule *model.Tran
 	spec.InitContainers = append(spec.InitContainers, *c)
 }
 
-// TranslateOktetoSyncSecret translates the syncthing secret container of a pod
-func TranslateOktetoSyncSecret(spec *apiv1.PodSpec, name string) {
+func isOktetoSyncSecretVolumePresent(spec *apiv1.PodSpec) bool {
+	for _, v := range spec.Volumes {
+		if v.Name == oktetoSyncSecretVolume {
+			return true
+		}
+	}
+	return false
+}
+
+// TranslateOktetoSyncthingVolumes translates the syncthing secret container of a pod
+func TranslateOktetoSyncthingVolumes(spec *apiv1.PodSpec, name string) {
 	if spec.Volumes == nil {
 		spec.Volumes = []apiv1.Volume{}
 	}
-	for i := range spec.Volumes {
-		if spec.Volumes[i].Name == oktetoSyncSecretVolume {
-			return
-		}
-	}
 
-	var mode int32 = 0444
-	v := apiv1.Volume{
-		Name: oktetoSyncSecretVolume,
-		VolumeSource: apiv1.VolumeSource{
-			Secret: &apiv1.SecretVolumeSource{
-				SecretName: fmt.Sprintf(oktetoSecretTemplate, name),
-				Items: []apiv1.KeyToPath{
-					{
-						Key:  "config.xml",
-						Path: "config.xml",
-						Mode: &mode,
-					},
-					{
-						Key:  "cert.pem",
-						Path: "cert.pem",
-						Mode: &mode,
-					},
-					{
-						Key:  "key.pem",
-						Path: "key.pem",
-						Mode: &mode,
+	syncthingVolumes := []apiv1.Volume{}
+	if !isOktetoSyncSecretVolumePresent(spec) {
+		var mode int32 = 0444
+		v := apiv1.Volume{
+			Name: oktetoSyncSecretVolume,
+			VolumeSource: apiv1.VolumeSource{
+				Secret: &apiv1.SecretVolumeSource{
+					SecretName: fmt.Sprintf(oktetoSecretTemplate, name),
+					Items: []apiv1.KeyToPath{
+						{
+							Key:  "config.xml",
+							Path: "config.xml",
+							Mode: &mode,
+						},
+						{
+							Key:  "cert.pem",
+							Path: "cert.pem",
+							Mode: &mode,
+						},
+						{
+							Key:  "key.pem",
+							Path: "key.pem",
+							Mode: &mode,
+						},
 					},
 				},
 			},
-		},
+		}
+		syncthingVolumes = append(syncthingVolumes, v)
 	}
-	spec.Volumes = append(spec.Volumes, v)
+
+	spec.Volumes = append(spec.Volumes, syncthingVolumes...)
 }
 
 // TranslateOktetoDevSecret translates the devs secret of a pod

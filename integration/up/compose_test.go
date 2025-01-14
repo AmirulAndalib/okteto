@@ -43,7 +43,7 @@ const (
     volumes:
     - .:/usr/src/app
   nginx:
-    image: nginx
+    build: nginx
     volumes:
       - ./nginx/nginx.conf:/tmp/nginx.conf
     command: /bin/bash -c "envsubst < /tmp/nginx.conf > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
@@ -69,6 +69,10 @@ const (
     proxy_pass http://$SERVER;
   }
 }`
+
+	nginxDockerfile = `FROM nginx
+COPY ./nginx.conf /tmp/nginx.conf
+`
 )
 
 func TestUpCompose(t *testing.T) {
@@ -78,15 +82,16 @@ func TestUpCompose(t *testing.T) {
 	oktetoPath, err := integration.GetOktetoPath()
 	require.NoError(t, err)
 
-	testNamespace := integration.GetTestNamespace("TestUpCompose", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 
 	indexPath := filepath.Join(dir, "index.html")
 	require.NoError(t, writeFile(indexPath, testNamespace))
@@ -165,6 +170,7 @@ func TestUpCompose(t *testing.T) {
 
 	// Test that original hasn't change
 	require.NoError(t, compareDeployment(context.Background(), originalDeployment, c))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func createAppDockerfile(dir string) error {
@@ -188,6 +194,12 @@ func createNginxDir(dir string) error {
 	nginxPath := filepath.Join(dir, "nginx", "nginx.conf")
 	nginxContent := []byte(nginxConf)
 	if err := os.WriteFile(nginxPath, nginxContent, 0600); err != nil {
+		return err
+	}
+
+	nginxDockerfilePath := filepath.Join(dir, "nginx", "Dockerfile")
+	nginxDockerfileContent := []byte(nginxDockerfile)
+	if err := os.WriteFile(nginxDockerfilePath, nginxDockerfileContent, 0600); err != nil {
 		return err
 	}
 	return nil

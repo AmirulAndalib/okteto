@@ -19,22 +19,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/a8m/envsubst"
-	"github.com/a8m/envsubst/parse"
+	"github.com/okteto/okteto/pkg/build"
 	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/deps"
 	"github.com/okteto/okteto/pkg/discovery"
+	"github.com/okteto/okteto/pkg/env"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/externalresource"
 	"github.com/okteto/okteto/pkg/filesystem"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model/forward"
 	"github.com/spf13/afero"
-	yaml "gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v2"
 	yaml3 "gopkg.in/yaml.v3"
 )
 
@@ -50,24 +50,20 @@ var (
 	OktetoManifestType Archetype = "manifest"
 	// PipelineType represents a okteto pipeline manifest type
 	PipelineType Archetype = "pipeline"
-	// KubernetesType represents a k8s manifest type
-	KubernetesType Archetype = "kubernetes"
-	// ChartType represents a k8s manifest type
-	ChartType Archetype = "chart"
 )
 
 const (
-	buildHeadComment = "The build section defines how to build the images of your development environment\nMore info: https://www.okteto.com/docs/reference/manifest/#build"
+	buildHeadComment = "The build section defines how to build the images of your development environment\nMore info: https://www.okteto.com/docs/reference/okteto-manifest/#build"
 	buildExample     = `build:
   my-service:
     context: .`
 	buildSvcEnvVars   = "You can use the following env vars to refer to this image in your deploy commands:\n - OKTETO_BUILD_%s_REGISTRY: image registry\n - OKTETO_BUILD_%s_REPOSITORY: image repo\n - OKTETO_BUILD_%s_IMAGE: image name\n - OKTETO_BUILD_%s_SHA: image tag sha256"
-	deployHeadComment = "The deploy section defines how to deploy your development environment\nMore info: https://www.okteto.com/docs/reference/manifest/#deploy"
+	deployHeadComment = "The deploy section defines how to deploy your development environment\nMore info: https://www.okteto.com/docs/reference/okteto-manifest/#deploy"
 	deployExample     = `deploy:
   commands:
   - name: Deploy
     command: echo 'Replace this line with the proper 'helm' or 'kubectl' commands to deploy your development environment'`
-	devHeadComment = "The dev section defines how to activate a development container\nMore info: https://www.okteto.com/docs/reference/manifest/#dev"
+	devHeadComment = "The dev section defines how to activate a development container\nMore info: https://www.okteto.com/docs/reference/okteto-manifest/#dev"
 	devExample     = `dev:
   sample:
     image: okteto/dev:latest
@@ -79,7 +75,7 @@ const (
       - name=$USER
     forward:
       - 8080:80`
-	dependenciesHeadComment = "The dependencies section defines other git repositories to be deployed as part of your development environment\nMore info: https://www.okteto.com/docs/reference/manifest/#dependencies"
+	dependenciesHeadComment = "The dependencies section defines other git repositories to be deployed as part of your development environment\nMore info: https://www.okteto.com/docs/reference/okteto-manifest/#dependencies"
 	dependenciesExample     = `dependencies:
   - https://github.com/okteto/sample`
 
@@ -93,41 +89,45 @@ var (
 
 // Manifest represents an okteto manifest
 type Manifest struct {
-	Name          string                                   `json:"name,omitempty" yaml:"name,omitempty"`
-	Namespace     string                                   `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Context       string                                   `json:"context,omitempty" yaml:"context,omitempty"`
-	Icon          string                                   `json:"icon,omitempty" yaml:"icon,omitempty"`
-	Deploy        *DeployInfo                              `json:"deploy,omitempty" yaml:"deploy,omitempty"`
-	Dev           ManifestDevs                             `json:"dev,omitempty" yaml:"dev,omitempty"`
-	Destroy       *DestroyInfo                             `json:"destroy,omitempty" yaml:"destroy,omitempty"`
-	Build         ManifestBuild                            `json:"build,omitempty" yaml:"build,omitempty"`
-	Dependencies  ManifestDependencies                     `json:"dependencies,omitempty" yaml:"dependencies,omitempty"`
-	GlobalForward []forward.GlobalForward                  `json:"forward,omitempty" yaml:"forward,omitempty"`
-	External      externalresource.ExternalResourceSection `json:"external,omitempty" yaml:"external,omitempty"`
+	Fs           afero.Fs                 `json:"-" yaml:"-"`
+	External     externalresource.Section `json:"external,omitempty" yaml:"external,omitempty"`
+	Dependencies deps.ManifestSection     `json:"dependencies,omitempty" yaml:"dependencies,omitempty"`
+	Build        build.ManifestBuild      `json:"build,omitempty" yaml:"build,omitempty"`
+	Deploy       *DeployInfo              `json:"deploy,omitempty" yaml:"deploy,omitempty"`
+	Dev          ManifestDevs             `json:"dev,omitempty" yaml:"dev,omitempty"`
+	Name         string                   `json:"name,omitempty" yaml:"name,omitempty"`
+	Icon         string                   `json:"icon,omitempty" yaml:"icon,omitempty"`
+	ManifestPath string                   `json:"-" yaml:"-"`
+	Destroy      *DestroyInfo             `json:"destroy,omitempty" yaml:"destroy,omitempty"`
+	Test         ManifestTests            `json:"test,omitempty" yaml:"test,omitempty"`
 
-	Type     Archetype `json:"-" yaml:"-"`
-	Manifest []byte    `json:"-" yaml:"-"`
-	IsV2     bool      `json:"-" yaml:"-"`
+	Type          Archetype               `json:"-" yaml:"-"`
+	GlobalForward []forward.GlobalForward `json:"forward,omitempty" yaml:"forward,omitempty"`
+	Manifest      []byte                  `json:"-" yaml:"-"`
 }
 
 // ManifestDevs defines all the dev section
 type ManifestDevs map[string]*Dev
 
-// ManifestBuild defines all the build section
-type ManifestBuild map[string]*BuildInfo
+// ManifestTests defines all the test sections
+type ManifestTests map[string]*Test
 
-// ManifestDependencies represents the map of dependencies at a manifest
-type ManifestDependencies map[string]*Dependency
+// ImageFromManifest is a thunk that returns an image value from a parsed manifest
+// This allows to implement general purpose logic on images without necessarily
+// referencing a specific image, for eg manifest.Deploy.Image or manifest.Destroy.Image
+type ImageFromManifest func(manifest *Manifest) string
 
 // NewManifest creates a new empty manifest
 func NewManifest() *Manifest {
 	return &Manifest{
 		Dev:           map[string]*Dev{},
-		Build:         map[string]*BuildInfo{},
-		Dependencies:  map[string]*Dependency{},
+		Test:          map[string]*Test{},
+		Build:         map[string]*build.Info{},
+		Dependencies:  deps.ManifestSection{},
 		Deploy:        &DeployInfo{},
 		GlobalForward: []forward.GlobalForward{},
-		External:      externalresource.ExternalResourceSection{},
+		External:      externalresource.Section{},
+		Fs:            afero.NewOsFs(),
 	}
 }
 
@@ -140,9 +140,8 @@ func NewManifestFromStack(stack *Stack) *Manifest {
 		})
 	}
 	stackManifest := &Manifest{
-		Type:      StackType,
-		Name:      stack.Name,
-		Namespace: stack.Namespace,
+		Type: StackType,
+		Name: stack.Name,
 		Deploy: &DeployInfo{
 			ComposeSection: &ComposeSectionInfo{
 				ComposesInfo: stackPaths,
@@ -150,8 +149,8 @@ func NewManifestFromStack(stack *Stack) *Manifest {
 			},
 		},
 		Dev:   ManifestDevs{},
-		Build: ManifestBuild{},
-		IsV2:  true,
+		Build: build.ManifestBuild{},
+		Fs:    afero.NewOsFs(),
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -166,33 +165,23 @@ func NewManifestFromStack(stack *Stack) *Manifest {
 	return stackManifest
 }
 
-// NewManifestFromDev creates a manifest from a dev
-func NewManifestFromDev(dev *Dev) *Manifest {
-	manifest := NewManifest()
-	name, err := ExpandEnv(dev.Name, true)
-	if err != nil {
-		oktetoLog.Infof("could not expand dev name '%s'", dev.Name)
-		name = dev.Name
-	}
-	manifest.Dev[name] = dev
-	return manifest
-}
-
 // DeployInfo represents what must be deployed for the app to work
 type DeployInfo struct {
-	Image          string              `json:"image,omitempty" yaml:"image,omitempty"`
-	Commands       []DeployCommand     `json:"commands,omitempty" yaml:"commands,omitempty"`
 	ComposeSection *ComposeSectionInfo `json:"compose,omitempty" yaml:"compose,omitempty"`
 	Endpoints      EndpointSpec        `json:"endpoints,omitempty" yaml:"endpoints,omitempty"`
 	Divert         *DivertDeploy       `json:"divert,omitempty" yaml:"divert,omitempty"`
-	Remote         bool                `json:"remote,omitempty" yaml:"remote,omitempty"`
+	Remote         *bool               `json:"remote,omitempty" yaml:"remote,omitempty"`
+	Image          string              `json:"image,omitempty" yaml:"image,omitempty"`
+	Context        string              `yaml:"context,omitempty"`
+	Commands       []DeployCommand     `json:"commands,omitempty" yaml:"commands,omitempty"`
 }
 
 // DestroyInfo represents what must be destroyed for the app
 type DestroyInfo struct {
+	Remote   *bool           `json:"remote,omitempty" yaml:"remote,omitempty"`
 	Image    string          `json:"image,omitempty" yaml:"image,omitempty"`
+	Context  string          `yaml:"context,omitempty"`
 	Commands []DeployCommand `json:"commands,omitempty" yaml:"commands,omitempty"`
-	Remote   bool            `json:"remote,omitempty" yaml:"remote,omitempty"`
 }
 
 // DivertDeploy represents information about the deploy divert configuration
@@ -200,10 +189,10 @@ type DivertDeploy struct {
 	Driver               string                 `json:"driver,omitempty" yaml:"driver,omitempty"`
 	Namespace            string                 `json:"namespace,omitempty" yaml:"namespace,omitempty"`
 	DeprecatedService    string                 `json:"service,omitempty" yaml:"service,omitempty"`
-	DeprecatedPort       int                    `json:"port,omitempty" yaml:"port,omitempty"`
 	DeprecatedDeployment string                 `json:"deployment,omitempty" yaml:"deployment,omitempty"`
 	VirtualServices      []DivertVirtualService `json:"virtualServices,omitempty" yaml:"virtualServices,omitempty"`
 	Hosts                []DivertHost           `json:"hosts,omitempty" yaml:"hosts,omitempty"`
+	DeprecatedPort       int                    `json:"port,omitempty" yaml:"port,omitempty"`
 }
 
 // DivertVirtualService represents a virtual service in a namespace to be diverted
@@ -221,8 +210,8 @@ type DivertHost struct {
 
 // ComposeSectionInfo represents information about compose file
 type ComposeSectionInfo struct {
-	ComposesInfo ComposeInfoList `json:"manifest,omitempty" yaml:"manifest,omitempty"`
 	Stack        *Stack          `json:"-" yaml:"-"`
+	ComposesInfo ComposeInfoList `json:"manifest,omitempty" yaml:"manifest,omitempty"`
 }
 
 type ComposeInfoList []ComposeInfo
@@ -240,21 +229,7 @@ type DeployCommand struct {
 	Command string `json:"command,omitempty" yaml:"command,omitempty"`
 }
 
-// NewDeployInfo creates a deploy Info
-func NewDeployInfo() *DeployInfo {
-	return &DeployInfo{
-		Commands: []DeployCommand{},
-	}
-}
-
-// NewDestroyInfo creates a destroy Info
-func NewDestroyInfo() *DestroyInfo {
-	return &DestroyInfo{
-		Commands: []DeployCommand{},
-	}
-}
-
-func getManifestFromOktetoFile(cwd string) (*Manifest, error) {
+func getManifestFromOktetoFile(cwd string, fs afero.Fs) (*Manifest, error) {
 	manifestPath, err := discovery.GetOktetoManifestPath(cwd)
 	if err != nil {
 		return nil, err
@@ -262,7 +237,7 @@ func getManifestFromOktetoFile(cwd string) (*Manifest, error) {
 	oktetoLog.Infof("Found okteto manifest file on path: %s", manifestPath)
 	oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Found okteto manifest on %s", manifestPath)
 	oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Unmarshalling manifest...")
-	devManifest, err := getManifestFromFile(cwd, manifestPath)
+	devManifest, err := getManifestFromFile(cwd, manifestPath, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -270,55 +245,33 @@ func getManifestFromOktetoFile(cwd string) (*Manifest, error) {
 	return devManifest, nil
 }
 
-func getManifestFromDevFilePath(cwd, manifestPath string) (*Manifest, error) {
+func getManifestFromDevFilePath(cwd, manifestPath string, fs afero.Fs) (*Manifest, error) {
 	if manifestPath != "" && !filepath.IsAbs(manifestPath) {
 		manifestPath = filepath.Join(cwd, manifestPath)
 	}
-	if manifestPath != "" && filesystem.FileExistsAndNotDir(manifestPath) {
-		return getManifestFromFile(cwd, manifestPath)
+	if manifestPath != "" && filesystem.FileExistsAndNotDir(manifestPath, afero.NewOsFs()) {
+		return getManifestFromFile(cwd, manifestPath, fs)
 	}
 
 	return nil, discovery.ErrOktetoManifestNotFound
 }
 
-// GetManifestV1 gets a manifest from a path or search for the files to generate it
-func GetManifestV1(manifestPath string) (*Manifest, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, err
+func pathExistsAndDir(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil && os.IsNotExist(err) {
+		return false
 	}
-
-	manifest, err := getManifestFromDevFilePath(cwd, manifestPath)
-	if err != nil {
-		if !errors.Is(err, discovery.ErrOktetoManifestNotFound) {
-			return nil, err
-		}
-	}
-
-	if manifest != nil {
-		return manifest, nil
-	}
-
-	if manifestPath != "" && pathExistsAndDir(manifestPath) {
-		cwd = manifestPath
-	}
-
-	manifest, err = getManifestFromOktetoFile(cwd)
-	if err != nil {
-		return nil, err
-	}
-
-	return manifest, nil
+	return info.IsDir()
 }
 
 // GetManifestV2 gets a manifest from a path or search for the files to generate it
-func GetManifestV2(manifestPath string) (*Manifest, error) {
+func GetManifestV2(manifestPath string, fs afero.Fs) (*Manifest, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}
 
-	manifest, err := getManifestFromDevFilePath(cwd, manifestPath)
+	manifest, err := getManifestFromDevFilePath(cwd, manifestPath, fs)
 	if err != nil {
 		if !errors.Is(err, discovery.ErrOktetoManifestNotFound) {
 			return nil, err
@@ -333,18 +286,18 @@ func GetManifestV2(manifestPath string) (*Manifest, error) {
 		cwd = manifestPath
 	}
 
-	manifest, err = getManifestFromOktetoFile(cwd)
+	manifest, err = getManifestFromOktetoFile(cwd, fs)
 	if err != nil {
 		if !errors.Is(err, discovery.ErrOktetoManifestNotFound) {
 			return nil, err
 		}
 	}
 
-	if manifest != nil && manifest.IsV2 {
+	if manifest != nil {
 		return manifest, nil
 	}
 
-	inferredManifest, err := GetInferredManifest(cwd)
+	inferredManifest, err := GetInferredManifest(cwd, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -375,23 +328,11 @@ func GetManifestV2(manifestPath string) (*Manifest, error) {
 		return inferredManifest, nil
 	}
 
-	if manifest != nil {
-		manifest.Type = OktetoType
-		manifest.Deploy = &DeployInfo{
-			Commands: []DeployCommand{
-				{
-					Name:    "okteto push",
-					Command: "okteto push",
-				},
-			},
-		}
-		return manifest, nil
-	}
 	return nil, discovery.ErrOktetoManifestNotFound
 }
 
 // getManifestFromFile retrieves the manifest from a given file, okteto manifest or docker-compose
-func getManifestFromFile(cwd, manifestPath string) (*Manifest, error) {
+func getManifestFromFile(cwd, manifestPath string, fs afero.Fs) (*Manifest, error) {
 	devManifest, err := getOktetoManifest(manifestPath)
 	if err != nil {
 		oktetoLog.Info("devManifest err, fallback to stack unmarshall")
@@ -405,8 +346,9 @@ func getManifestFromFile(cwd, manifestPath string) (*Manifest, error) {
 				},
 			},
 			Dev:   ManifestDevs{},
-			Build: ManifestBuild{},
-			IsV2:  true,
+			Test:  ManifestTests{},
+			Build: build.ManifestBuild{},
+			Fs:    fs,
 		}
 		oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Unmarshalling compose...")
 
@@ -415,7 +357,7 @@ func getManifestFromFile(cwd, manifestPath string) (*Manifest, error) {
 			composeFiles = append(composeFiles, composeInfo.File)
 		}
 		// We need to ensure that LoadStack has false because we don't want to expand env vars
-		s, stackErr := LoadStack("", composeFiles, false)
+		s, stackErr := LoadStack("", composeFiles, false, fs)
 		if stackErr != nil {
 			// if err is from validation, then return the stackErr
 			if errors.Is(stackErr, errDependsOn) {
@@ -440,45 +382,39 @@ func getManifestFromFile(cwd, manifestPath string) (*Manifest, error) {
 		oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Okteto compose unmarshalled successfully")
 		return stackManifest, nil
 	}
-	if devManifest.IsV2 {
-		oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Okteto manifest v2 unmarshalled successfully")
-		devManifest.Type = OktetoManifestType
-		if devManifest.Deploy != nil && devManifest.Deploy.ComposeSection != nil && len(devManifest.Deploy.ComposeSection.ComposesInfo) > 0 {
-			var stackFiles []string
-			for _, composeInfo := range devManifest.Deploy.ComposeSection.ComposesInfo {
-				stackFiles = append(stackFiles, composeInfo.File)
-			}
-			// LoadStack should perform validation of the stack read from the file on compose section
-			// We need to ensure that LoadStack has false because we don't want to expand env vars
-			s, err := LoadStack("", stackFiles, false)
-			if err != nil {
-				return nil, err
-			}
-			devManifest.Deploy.ComposeSection.Stack = s
-			devManifest, err = devManifest.InferFromStack(cwd)
-			if devManifest.Deploy.Endpoints != nil {
-				s.Endpoints = devManifest.Deploy.Endpoints
-			}
-			if err != nil {
-				return nil, err
-			}
+	oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Okteto manifest v2 unmarshalled successfully")
+	devManifest.Type = OktetoManifestType
+	if devManifest.Deploy != nil && devManifest.Deploy.ComposeSection != nil && len(devManifest.Deploy.ComposeSection.ComposesInfo) > 0 {
+		var stackFiles []string
+		for _, composeInfo := range devManifest.Deploy.ComposeSection.ComposesInfo {
+			stackFiles = append(stackFiles, composeInfo.File)
 		}
-		return devManifest, nil
-	} else {
-		devManifest.setManifestDefaultsFromDev()
+		// LoadStack should perform validation of the stack read from the file on compose section
+		// We need to ensure that LoadStack has false because we don't want to expand env vars
+		s, err := LoadStack("", stackFiles, false, fs)
+		if err != nil {
+			return nil, err
+		}
+		devManifest.Deploy.ComposeSection.Stack = s
+		devManifest, err = devManifest.InferFromStack(cwd)
+		if devManifest.Deploy.Endpoints != nil {
+			s.Endpoints = devManifest.Deploy.Endpoints
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	return devManifest, nil
-
 }
 
 // GetInferredManifest infers the manifest from a directory
-func GetInferredManifest(cwd string) (*Manifest, error) {
+func GetInferredManifest(cwd string, fs afero.Fs) (*Manifest, error) {
 	pipelinePath, err := discovery.GetOktetoPipelinePath(cwd)
 	if err == nil {
 		oktetoLog.Infof("Found pipeline on: %s", pipelinePath)
 		oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Found okteto pipeline manifest on %s", pipelinePath)
 		oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Unmarshalling pipeline manifest...")
-		pipelineManifest, err := GetManifestV2(pipelinePath)
+		pipelineManifest, err := GetManifestV2(pipelinePath, fs)
 		if err != nil {
 			return nil, err
 		}
@@ -505,15 +441,16 @@ func GetInferredManifest(cwd string) (*Manifest, error) {
 				},
 			},
 			Dev:   ManifestDevs{},
-			Build: ManifestBuild{},
-			IsV2:  true,
+			Test:  ManifestTests{},
+			Build: build.ManifestBuild{},
+			Fs:    fs,
 		}
 		oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Unmarshalling compose...")
 		var stackFiles []string
 		for _, composeInfo := range stackManifest.Deploy.ComposeSection.ComposesInfo {
 			stackFiles = append(stackFiles, composeInfo.File)
 		}
-		s, err := LoadStack("", stackFiles, true)
+		s, err := LoadStack("", stackFiles, true, fs)
 		if err != nil {
 			return nil, err
 		}
@@ -524,90 +461,10 @@ func GetInferredManifest(cwd string) (*Manifest, error) {
 		return stackManifest, nil
 	}
 
-	chartPath, err := discovery.GetHelmChartPath(cwd)
-	if err == nil {
-		oktetoLog.Infof("Found chart")
-		chartPath, err := filepath.Rel(cwd, chartPath)
-		if err != nil {
-			return nil, err
-		}
-		oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Found helm chart on %s", chartPath)
-		tags := inferHelmTags(chartPath)
-		deployHelm := fmt.Sprintf("helm upgrade --install ${%s} %s %s", constants.OktetoAutodiscoveryReleaseName, chartPath, tags)
-		chartManifest := &Manifest{
-			Type: ChartType,
-			Deploy: &DeployInfo{
-				Commands: []DeployCommand{
-					{
-						Name:    deployHelm,
-						Command: deployHelm,
-					},
-				},
-			},
-			Dev:   ManifestDevs{},
-			Build: ManifestBuild{},
-		}
-		return chartManifest, nil
+	return nil, oktetoErrors.UserError{
+		E:    oktetoErrors.ErrCouldNotInferAnyManifest,
+		Hint: "Check https://www.okteto.com/docs/get-started/deploy-your-app/ to deploy your application",
 	}
-
-	k8sManifestPath, err := discovery.GetK8sManifestPath(cwd)
-	if err == nil {
-		oktetoLog.Infof("Found kubernetes manifests")
-		manifestPath, err := filepath.Rel(cwd, k8sManifestPath)
-		if err != nil {
-			return nil, err
-		}
-		oktetoLog.AddToBuffer(oktetoLog.InfoLevel, "Found kubernetes manifest on %s", manifestPath)
-		k8sManifest := &Manifest{
-			Type: KubernetesType,
-			Deploy: &DeployInfo{
-				Commands: []DeployCommand{
-					{
-						Name:    fmt.Sprintf("kubectl apply -f %s", manifestPath),
-						Command: fmt.Sprintf("kubectl apply -f %s", manifestPath),
-					},
-				},
-			},
-			Dev:   ManifestDevs{},
-			Build: ManifestBuild{},
-		}
-		return k8sManifest, nil
-	}
-
-	return nil, oktetoErrors.ErrCouldNotInferAnyManifest
-}
-
-func inferHelmTags(path string) string {
-	valuesPath := filepath.Join(path, "values.yaml")
-	if _, err := os.Stat(valuesPath); err != nil {
-		oktetoLog.Info("chart values not found")
-		return ""
-	}
-	type valuesImages struct {
-		Image string `yaml:"image,omitempty"`
-	}
-
-	b, err := os.ReadFile(valuesPath)
-	if err != nil {
-		oktetoLog.Info("could not read file values")
-		return ""
-	}
-	tags := map[string]*valuesImages{}
-	if err := yaml.Unmarshal(b, tags); err != nil {
-		oktetoLog.Info("could not parse values image tags")
-		return ""
-	}
-	result := ""
-	for svcName, image := range tags {
-		if image == nil {
-			continue
-		}
-		if image.Image != "" {
-			result += fmt.Sprintf(" --set %s.image=${OKTETO_BUILD_%s_IMAGE}", svcName, strings.ToUpper(svcName))
-			os.Setenv(fmt.Sprintf("OKTETO_BUILD_%s_IMAGE", strings.ToUpper(svcName)), image.Image)
-		}
-	}
-	return result
 }
 
 // getOktetoManifest returns an okteto object from a given file
@@ -629,34 +486,14 @@ func getOktetoManifest(devPath string) (*Manifest, error) {
 		if errors.Is(err, oktetoErrors.ErrNotManifestContentDetected) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: %s", oktetoErrors.ErrInvalidManifest, err.Error())
-	}
-
-	ef := externalresource.ERFilesystemManager{
-		Fs: afero.NewOsFs(),
+		return nil, NewManifestFriendlyError(err)
 	}
 
 	for name, external := range manifest.External {
 		external.SetDefaults(name)
-		ef.ExternalResource = *external
-		err := ef.LoadMarkdownContent(devPath)
-		if err != nil {
-			oktetoLog.Infof("error loading external resource %s: %s", name, err.Error())
-		}
 	}
 
-	for _, dev := range manifest.Dev {
-
-		if err := dev.loadAbsPaths(devPath); err != nil {
-			return nil, err
-		}
-
-		if err := dev.expandEnvFiles(); err != nil {
-			return nil, err
-		}
-
-		dev.computeParentSyncFolder()
-	}
+	manifest.ManifestPath = devPath
 
 	return manifest, nil
 }
@@ -671,37 +508,10 @@ func isEmptyManifestFile(bytes []byte) bool {
 // Read reads an okteto manifests
 func Read(bytes []byte) (*Manifest, error) {
 	manifest := NewManifest()
+
 	if bytes != nil {
 		if err := yaml.UnmarshalStrict(bytes, manifest); err != nil {
-			if err := yaml.Unmarshal(bytes, manifest); err == nil {
-				if reflect.DeepEqual(manifest, NewManifest()) {
-					return nil, oktetoErrors.ErrNotManifestContentDetected
-				}
-			}
-
-			if strings.HasPrefix(err.Error(), "yaml: unmarshal errors:") {
-				var sb strings.Builder
-				l := strings.Split(err.Error(), "\n")
-				for i := 1; i < len(l); i++ {
-					e := strings.TrimSuffix(l[i], "in type model.Manifest")
-					e = strings.TrimSpace(e)
-					_, _ = sb.WriteString(fmt.Sprintf("    - %s\n", e))
-				}
-
-				_, _ = sb.WriteString(fmt.Sprintf("    See %s for details", "https://okteto.com/docs/reference/manifest/"))
-				return nil, fmt.Errorf("\n%s", sb.String())
-			}
-
-			msg := strings.TrimSuffix(err.Error(), "in type model.Manifest")
-			return nil, fmt.Errorf("\n%s", msg)
-		}
-	}
-
-	hasShownWarning := false
-	for _, dev := range manifest.Dev {
-		if (dev.Image.Context != "" || dev.Image.Dockerfile != "") && !hasShownWarning {
-			hasShownWarning = true
-			oktetoLog.Yellow(`The 'image' extended syntax is deprecated and will be removed in a future version. Define the images you want to build in the 'build' section of your manifest. More info at https://www.okteto.com/docs/reference/manifest/#build"`)
+			return nil, err
 		}
 	}
 
@@ -712,46 +522,33 @@ func Read(bytes []byte) (*Manifest, error) {
 	if err := manifest.validate(); err != nil {
 		return nil, err
 	}
+
 	manifest.Manifest = bytes
 	manifest.Type = OktetoManifestType
 	return manifest, nil
 }
 
 func (m *Manifest) validate() error {
-	if err := m.Build.validate(); err != nil {
+	if err := m.Build.Validate(); err != nil {
 		return err
 	}
 	return m.validateDivert()
 }
 
-func (b *ManifestBuild) validate() error {
-	cycle := getDependentCyclic(b.toGraph())
-	if len(cycle) == 1 { // depends on the same node
-		return fmt.Errorf("manifest build validation failed: image '%s' is referenced on its dependencies", cycle[0])
-	} else if len(cycle) > 1 {
-		svcsDependents := fmt.Sprintf("%s and %s", strings.Join(cycle[:len(cycle)-1], ", "), cycle[len(cycle)-1])
-		return fmt.Errorf("manifest validation failed: cyclic dependendecy found between %s", svcsDependents)
+func (s *Secret) validate() error {
+	if s.LocalPath == "" || s.RemotePath == "" {
+		return fmt.Errorf("secrets must follow the syntax 'LOCAL_PATH:REMOTE_PATH:MODE'")
 	}
+
+	if exists := filesystem.FileExistsAndNotDir(s.LocalPath, afero.NewOsFs()); !exists {
+		return fmt.Errorf("secret '%s' is not a regular file", s.LocalPath)
+	}
+
+	if !strings.HasPrefix(s.RemotePath, "/") {
+		return fmt.Errorf("secret remote path '%s' must be an absolute path", s.RemotePath)
+	}
+
 	return nil
-}
-
-// GetSvcsToBuildFromList returns the builds from a list and all its
-func (b *ManifestBuild) GetSvcsToBuildFromList(toBuild []string) []string {
-	initialSvcsToBuild := toBuild
-	svcsToBuildWithDependencies := getDependentNodes(b.toGraph(), toBuild)
-	if len(initialSvcsToBuild) != len(svcsToBuildWithDependencies) {
-		dependantBuildImages := getListDiff(initialSvcsToBuild, svcsToBuildWithDependencies)
-		oktetoLog.Warning("The following build images need to be built because of dependencies: [%s]", strings.Join(dependantBuildImages, ", "))
-	}
-	return svcsToBuildWithDependencies
-}
-
-func (b ManifestBuild) toGraph() graph {
-	g := graph{}
-	for k, v := range b {
-		g[k] = v.DependsOn
-	}
-	return g
 }
 
 // SanitizeSvcNames sanitize service names in 'dev', 'build' and 'global forward' sections
@@ -807,15 +604,15 @@ func (m *Manifest) validateDivert() error {
 	}
 
 	switch m.Deploy.Divert.Driver {
-	case constants.OktetoDivertWeaverDriver:
+	case constants.OktetoDivertNginxDriver:
 		if m.Deploy.Divert.Namespace == "" {
 			return fmt.Errorf("the field 'deploy.divert.namespace' is mandatory")
 		}
 		if len(m.Deploy.Divert.VirtualServices) > 0 {
-			return fmt.Errorf("the field 'deploy.divert.virtualServices' is not supported with the weaver driver")
+			return fmt.Errorf("the field 'deploy.divert.virtualServices' is not supported with the nginx driver")
 		}
 		if len(m.Deploy.Divert.Hosts) > 0 {
-			return fmt.Errorf("the field 'deploy.divert.host' is not supported with the weaver driver")
+			return fmt.Errorf("the field 'deploy.divert.host' is not supported with the nginx driver")
 		}
 	case constants.OktetoDivertIstioDriver:
 		if m.Deploy.Divert.DeprecatedService != "" {
@@ -853,18 +650,18 @@ func (m *Manifest) setDefaults() error {
 	if m.Deploy != nil && m.Deploy.Divert != nil {
 		var err error
 		if m.Deploy.Divert.Driver == "" {
-			m.Deploy.Divert.Driver = constants.OktetoDivertWeaverDriver
+			m.Deploy.Divert.Driver = constants.OktetoDivertNginxDriver
 		}
-		m.Deploy.Divert.Namespace, err = ExpandEnv(m.Deploy.Divert.Namespace, false)
+		m.Deploy.Divert.Namespace, err = env.ExpandEnvIfNotEmpty(m.Deploy.Divert.Namespace)
 		if err != nil {
 			return err
 		}
 		for i := range m.Deploy.Divert.Hosts {
-			m.Deploy.Divert.Hosts[i].VirtualService, err = ExpandEnv(m.Deploy.Divert.Hosts[i].VirtualService, false)
+			m.Deploy.Divert.Hosts[i].VirtualService, err = env.ExpandEnvIfNotEmpty(m.Deploy.Divert.Hosts[i].VirtualService)
 			if err != nil {
 				return err
 			}
-			m.Deploy.Divert.Hosts[i].Namespace, err = ExpandEnv(m.Deploy.Divert.Hosts[i].Namespace, false)
+			m.Deploy.Divert.Hosts[i].Namespace, err = env.ExpandEnvIfNotEmpty(m.Deploy.Divert.Hosts[i].Namespace)
 			if err != nil {
 				return err
 			}
@@ -875,22 +672,20 @@ func (m *Manifest) setDefaults() error {
 			d.Name = dName
 		}
 		if err := d.expandEnvVars(); err != nil {
-			return fmt.Errorf("Error on dev '%s': %s", d.Name, err)
+			return fmt.Errorf("error on dev '%s': %w", d.Name, err)
 		}
 		for _, s := range d.Services {
 			if err := s.expandEnvVars(); err != nil {
-				return fmt.Errorf("Error on dev '%s': %s", d.Name, err)
+				return fmt.Errorf("error on dev '%s': %w", d.Name, err)
 			}
 			if err := s.validateForExtraFields(); err != nil {
-				return fmt.Errorf("Error on dev '%s': %s", d.Name, err)
+				return fmt.Errorf("error on dev '%s': %w", d.Name, err)
 			}
 		}
 
 		if err := d.SetDefaults(); err != nil {
-			return fmt.Errorf("Error on dev '%s': %s", d.Name, err)
+			return fmt.Errorf("error on dev '%s': %w", d.Name, err)
 		}
-
-		d.translateDeprecatedMetadataFields()
 
 		sort.SliceStable(d.Forward, func(i, j int) bool {
 			return d.Forward[i].Less(&d.Forward[j])
@@ -906,13 +701,12 @@ func (m *Manifest) setDefaults() error {
 	}
 
 	for _, b := range m.Build {
-		if b.Name != "" {
-			b.Context = b.Name
-			b.Name = ""
+		if b == nil {
+			continue
 		}
 
 		if !(b.Image != "" && len(b.VolumesToInclude) > 0 && b.Dockerfile == "") {
-			b.setBuildDefaults()
+			b.SetBuildDefaults()
 		}
 	}
 
@@ -944,7 +738,7 @@ func (manifest *Manifest) ExpandEnvVars() error {
 			for _, composeInfo := range manifest.Deploy.ComposeSection.ComposesInfo {
 				stackFiles = append(stackFiles, composeInfo.File)
 			}
-			s, err := LoadStack("", stackFiles, true)
+			s, err := LoadStack("", stackFiles, true, manifest.Fs)
 			if err != nil {
 				oktetoLog.Infof("Could not reload stack manifest: %s", err)
 				s = manifest.Deploy.ComposeSection.Stack
@@ -956,7 +750,7 @@ func (manifest *Manifest) ExpandEnvVars() error {
 					continue
 				}
 				tag := fmt.Sprintf("${OKTETO_BUILD_%s_IMAGE}", strings.ToUpper(strings.ReplaceAll(svcName, "-", "_")))
-				expandedTag, err := ExpandEnv(tag, true)
+				expandedTag, err := env.ExpandEnv(tag)
 				if err != nil {
 					return err
 				}
@@ -983,7 +777,7 @@ func (manifest *Manifest) ExpandEnvVars() error {
 	}
 	if manifest.Destroy != nil {
 		if manifest.Destroy.Image != "" {
-			manifest.Destroy.Image, err = ExpandEnv(manifest.Destroy.Image, true)
+			manifest.Destroy.Image, err = env.ExpandEnv(manifest.Destroy.Image)
 			if err != nil {
 				return err
 			}
@@ -991,106 +785,27 @@ func (manifest *Manifest) ExpandEnvVars() error {
 	}
 
 	for devName, devInfo := range manifest.Dev {
-		if _, ok := manifest.Build[devName]; ok && devInfo.Image == nil && devInfo.Autocreate {
-			devInfo.Image = &BuildInfo{
-				Name: fmt.Sprintf("${OKTETO_BUILD_%s_IMAGE}", strings.ToUpper(strings.ReplaceAll(devName, "-", "_"))),
-			}
+		if _, ok := manifest.Build[devName]; ok && devInfo.Image == "" && devInfo.Autocreate {
+			devInfo.Image = fmt.Sprintf("${OKTETO_BUILD_%s_IMAGE}", strings.ToUpper(strings.ReplaceAll(devName, "-", "_")))
 		}
-		if devInfo.Image != nil {
-			devInfo.Image.Name, err = ExpandEnv(devInfo.Image.Name, false)
+		if devInfo.Image != "" {
+			devInfo.Image, err = env.ExpandEnvIfNotEmpty(devInfo.Image)
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	return nil
-}
-
-// Dependency represents a dependency object at the manifest
-type Dependency struct {
-	Repository   string        `json:"repository" yaml:"repository"`
-	ManifestPath string        `json:"manifest,omitempty" yaml:"manifest,omitempty"`
-	Branch       string        `json:"branch,omitempty" yaml:"branch,omitempty"`
-	Variables    Environment   `json:"variables,omitempty" yaml:"variables,omitempty"`
-	Wait         bool          `json:"wait,omitempty" yaml:"wait,omitempty"`
-	Timeout      time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-	Namespace    string        `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-}
-
-// GetTimeout returns dependency.Timeout if it's set or the one passed as arg if it's not
-func (d *Dependency) GetTimeout(defaultTimeout time.Duration) time.Duration {
-	if d.Timeout != 0 {
-		return d.Timeout
-	}
-	return defaultTimeout
-}
-
-// ExpandVars sets dependencies values if values fits with list params
-func (d *Dependency) ExpandVars(variables []string) error {
-	parser := parse.New("string", append(os.Environ(), variables...), &parse.Restrictions{})
-
-	expandedBranch, err := parser.Parse(d.Branch)
-	if err != nil {
-		return fmt.Errorf("error expanding 'branch': %w", err)
-	}
-	if expandedBranch != "" {
-		d.Branch = expandedBranch
-	}
-
-	expandedRepository, err := parser.Parse(d.Repository)
-	if err != nil {
-		return fmt.Errorf("error expanding 'repository': %w", err)
-	}
-	if expandedRepository != "" {
-		d.Repository = expandedRepository
-	}
-
-	expandedManifestPath, err := parser.Parse(d.ManifestPath)
-	if err != nil {
-		return fmt.Errorf("error expanding 'manifest': %w", err)
-	}
-	if expandedManifestPath != "" {
-		d.ManifestPath = expandedManifestPath
-	}
-
-	expandedNamespace, err := parser.Parse(d.Namespace)
-	if err != nil {
-		return fmt.Errorf("error expanding 'namespace': %w", err)
-	}
-	if expandedNamespace != "" {
-		d.Namespace = expandedNamespace
-	}
-
-	expandedVariables := Environment{}
-	for _, v := range d.Variables {
-		expandedVarName, err := parser.Parse(v.Name)
-		if err != nil {
-			return fmt.Errorf("error expanding variable name: %w", err)
+	for _, mf := range manifest.Test {
+		if mf.expandEnvVars() != nil {
+			return err
 		}
-		if expandedVarName != "" {
-			v.Name = expandedVarName
-		}
-
-		expandedVarValue, err := parser.Parse(v.Value)
-		if err != nil {
-			return fmt.Errorf("error expanding variable value: %w", err)
-		}
-		if expandedVarValue != "" {
-			v.Value = expandedVarValue
-		}
-
-		expandedVariables = append(expandedVariables, EnvVar{
-			Name:  v.Name,
-			Value: v.Value,
-		})
 	}
-	d.Variables = expandedVariables
 
 	return nil
 }
 
-// InferFromStack infers data from a stackfile
+// InferFromStack infers data, mainly dev services and build information from services defined in the stackfile
 func (m *Manifest) InferFromStack(cwd string) (*Manifest, error) {
 	for svcName, svcInfo := range m.Deploy.ComposeSection.Stack.Services {
 		d, err := svcInfo.ToDev(svcName)
@@ -1110,48 +825,73 @@ func (m *Manifest) InferFromStack(cwd string) (*Manifest, error) {
 
 		buildInfo := svcInfo.Build
 
-		switch {
-		case buildInfo != nil && len(svcInfo.VolumeMounts) > 0:
-			if svcInfo.Image != "" {
-				buildInfo.Image = svcInfo.Image
+		// Only if the build section of the service is empty, the service specifies an image and there are
+		// volume mounts we should create a custom Dockerfile including the volumes and generate the proper build section
+		if svcInfo.Build == nil && svcInfo.Image != "" && len(svcInfo.VolumeMounts) > 0 {
+			// This check is to prevent that we modify the build section of the manifest if that service is already
+			// defined there. In that case, we should just skip this and don't generate the custom Dockerfile and
+			// build info
+			if _, ok := m.Build[svcName]; ok {
+				continue
 			}
-			buildInfo.VolumesToInclude = svcInfo.VolumeMounts
-		case buildInfo != nil:
-			if svcInfo.Image != "" {
-				buildInfo.Image = svcInfo.Image
-			}
-		case len(svcInfo.VolumeMounts) > 0:
-			buildInfo = &BuildInfo{
-				Image:            svcInfo.Image,
-				VolumesToInclude: svcInfo.VolumeMounts,
-			}
-		default:
-			oktetoLog.Infof("could not build service %s, due to not having Dockerfile defined or volumes to include", svcName)
-		}
 
-		for idx, volume := range buildInfo.VolumesToInclude {
-			localPath := volume.LocalPath
-			if filepath.IsAbs(localPath) {
-				localPath, err = filepath.Rel(buildInfo.Context, volume.LocalPath)
-				if err != nil {
-					localPath, err = filepath.Rel(cwd, volume.LocalPath)
+			context, err := getBuildContextForComposeWithVolumeMounts(m)
+			if err != nil {
+				return nil, err
+			}
+
+			for idx, volume := range svcInfo.VolumeMounts {
+				localPath := volume.LocalPath
+				if filepath.IsAbs(localPath) {
+					localPath, err = filepath.Rel(context, volume.LocalPath)
 					if err != nil {
-						oktetoLog.Info("can not find svc[%s].build.volumes to include relative to svc[%s].build.context", svcName, svcName)
+						localPath, err = filepath.Rel(cwd, volume.LocalPath)
+						if err != nil {
+							oktetoLog.Info("can not find svc[%s].build.volumes to include relative to svc[%s].build.context", svcName, svcName)
+						}
 					}
 				}
+				volume.LocalPath = localPath
+				svcInfo.VolumeMounts[idx] = volume
 			}
-			volume.LocalPath = localPath
-			buildInfo.VolumesToInclude[idx] = volume
+
+			buildInfo, err = build.CreateDockerfileWithVolumeMounts(context, svcInfo.Image, svcInfo.VolumeMounts, m.Fs)
+			if err != nil {
+				return nil, err
+			}
+
+			svcInfo.Build = buildInfo
+		} else {
+			if buildInfo == nil {
+				buildInfo = &build.Info{}
+			}
+
+			if len(svcInfo.VolumeMounts) > 0 {
+				buildInfo.VolumesToInclude = svcInfo.VolumeMounts
+			}
+
+			if svcInfo.Image != "" {
+				buildInfo.Image = svcInfo.Image
+			}
+
+			contextAbs := buildInfo.Context
+			contextIsAbs := filepath.IsAbs(contextAbs)
+			dockerFileIsAbs := filepath.IsAbs(buildInfo.Dockerfile)
+			switch {
+			case contextIsAbs && dockerFileIsAbs:
+				buildInfo.Dockerfile, err = filepath.Rel(contextAbs, buildInfo.Dockerfile)
+				if err != nil {
+					return nil, err
+				}
+			case !contextIsAbs && !dockerFileIsAbs:
+				oktetoLog.Infof("context and dockerfile are relative")
+			case !contextIsAbs && dockerFileIsAbs:
+				oktetoLog.Infof("context is not absolute but dockerfile is absolute")
+			default: // contextIsAbs && !dockerFileIsAbs
+				oktetoLog.Infof("context is absolute but dockerfile is relative")
+			}
 		}
-		buildInfo.Context, err = filepath.Rel(cwd, buildInfo.Context)
-		if err != nil {
-			oktetoLog.Infof("can not make svc[%s].build.context relative to cwd", svcName)
-		}
-		contextAbs := filepath.Join(cwd, buildInfo.Context)
-		buildInfo.Dockerfile, err = filepath.Rel(contextAbs, buildInfo.Dockerfile)
-		if err != nil {
-			oktetoLog.Infof("can not make svc[%s].build.dockerfile relative to cwd", svcName)
-		}
+
 		if _, ok := m.Build[svcName]; !ok {
 			m.Build[svcName] = buildInfo
 		}
@@ -1174,33 +914,18 @@ func (m *Manifest) WriteToFile(filePath string) error {
 			}
 		}
 	}
-	for _, b := range m.Build {
-		b.Name = ""
-	}
 	for dName, d := range m.Dev {
 		d.Name = ""
-		d.Context = ""
-		d.Namespace = ""
-		if d.Image != nil && d.Image.Name != "" {
-			d.Image.Context = ""
-			d.Image.Dockerfile = ""
-		} else {
+		if d.Image == "" {
 			if v, ok := m.Build[dName]; ok {
 				if v.Image != "" {
-					d.Image = &BuildInfo{Name: v.Image}
+					d.Image = v.Image
 				} else {
-					d.Image = nil
+					d.Image = ""
 				}
 			} else {
-				d.Image = nil
+				d.Image = ""
 			}
-		}
-
-		if d.Push != nil && d.Push.Name != "" {
-			d.Push.Context = ""
-			d.Push.Dockerfile = ""
-		} else {
-			d.Push = nil
 		}
 	}
 	// Unmarshal with yamlv2 because we have the marshal with yaml v2
@@ -1395,18 +1120,6 @@ func (m *Manifest) IsDeployDefault() bool {
 	return false
 }
 
-// setManifestDefaultsFromDev sets context and namespace from the dev
-func (m *Manifest) setManifestDefaultsFromDev() {
-	if len(m.Dev) == 1 {
-		for _, devInfo := range m.Dev {
-			m.Context = devInfo.Context
-			m.Namespace = devInfo.Namespace
-		}
-	} else {
-		oktetoLog.Infof("could not set context and manifest from dev section due to being '%d' devs declared", len(m.Dev))
-	}
-}
-
 // HasDependencies returns true if the manifest has dependencies
 func (m *Manifest) HasDependencies() bool {
 	if m.Dependencies == nil {
@@ -1449,23 +1162,122 @@ func (m *Manifest) HasDependenciesSection() bool {
 	if m == nil {
 		return false
 	}
-	return m.IsV2 && len(m.Dependencies) > 0
+	return len(m.Dependencies) > 0
 }
 
 func (m *Manifest) HasBuildSection() bool {
 	if m == nil {
 		return false
 	}
-	return m.IsV2 && len(m.Build) > 0
+	return len(m.Build) > 0
 }
 
 func (m *Manifest) HasDeploySection() bool {
 	if m == nil {
 		return false
 	}
-	return m.IsV2 &&
-		m.Deploy != nil &&
+	return m.Deploy != nil &&
 		(len(m.Deploy.Commands) > 0 ||
 			(m.Deploy.ComposeSection != nil &&
 				m.Deploy.ComposeSection.ComposesInfo != nil))
+}
+
+// getBuildContextForComposeWithVolumeMounts This function is very specific for the scenario of compose with
+// volume mounts where an image wrapping the image specified in the compose is built. This heuristic to calculate
+// the build context is:
+//   - If the manifestPath property is set, we should use the directory where the manifest is located.
+//     We use GetWorkdirFromManifestPath because it takes care of the case of .okteto directory
+//   - If there is any compose info, we should use the directory where the first compose is located.
+//     We use GetWorkdirFromManifestPath because it takes care of the case of .okteto directory
+//   - If none of the other condition is met, we just use the current directory
+func getBuildContextForComposeWithVolumeMounts(m *Manifest) (string, error) {
+	context, err := filepath.Abs(".")
+	if err != nil {
+		return "", err
+	}
+
+	hasComposeInfo := m.Deploy != nil &&
+		m.Deploy.ComposeSection != nil &&
+		len(m.Deploy.ComposeSection.ComposesInfo) > 0
+
+	if m.ManifestPath != "" {
+		context = filesystem.GetWorkdirFromManifestPath(m.ManifestPath)
+	} else if hasComposeInfo {
+		context = filesystem.GetWorkdirFromManifestPath(m.Deploy.ComposeSection.ComposesInfo[0].File)
+	}
+
+	return context, nil
+}
+
+func (di DeployInfo) IsEmpty() bool {
+	if len(di.Commands) > 0 {
+		return false
+	}
+	if di.ComposeSection != nil && di.ComposeSection.Stack != nil {
+		return false
+	}
+	if di.Divert != nil {
+		return false
+	}
+	if di.Endpoints != nil {
+		return false
+	}
+	return true
+}
+
+func (di DestroyInfo) IsEmpty() bool {
+	if di.Image != "" {
+		return false
+	}
+	if len(di.Commands) > 0 {
+		return false
+	}
+	return true
+}
+
+func (mt ManifestTests) IsEmpty() bool {
+	return len(mt) == 0
+}
+
+func (m *Manifest) ValidateForCLIOnly() error {
+	if m.Type == StackType {
+		return oktetoErrors.UserError{
+			E: fmt.Errorf("Docker Compose is only available using the Okteto Platform"),
+			Hint: `Visit our docs to learn more about the Okteto Platform:
+    https://www.okteto.com/docs`,
+		}
+	}
+
+	invalidFields := []string{}
+	if !(m.Build == nil || m.Build.IsEmpty()) {
+		invalidFields = append(invalidFields, "build")
+	}
+	if !(m.Dependencies == nil || m.Dependencies.IsEmpty()) {
+		invalidFields = append(invalidFields, "dependencies")
+	}
+	if !(m.Deploy == nil || m.Deploy.IsEmpty()) {
+		invalidFields = append(invalidFields, "deploy")
+	}
+	if !(m.Destroy == nil || m.Destroy.IsEmpty()) {
+		invalidFields = append(invalidFields, "destroy")
+	}
+	if !(m.External == nil || m.External.IsEmpty()) {
+		invalidFields = append(invalidFields, "external")
+	}
+	if !(m.Test == nil || m.Test.IsEmpty()) {
+		invalidFields = append(invalidFields, "test")
+	}
+	if m.Icon != "" {
+		invalidFields = append(invalidFields, "icon")
+	}
+	if m.Name != "" {
+		invalidFields = append(invalidFields, "name")
+	}
+	if len(invalidFields) > 0 {
+		return oktetoErrors.UserError{
+			E:    fmt.Errorf("the following fields are only available installing Okteto in your cluster: %s", strings.Join(invalidFields, ", ")),
+			Hint: "Visit our docs to learn more about the Okteto Platform:\n    https://www.okteto.com/docs",
+		}
+	}
+	return nil
 }

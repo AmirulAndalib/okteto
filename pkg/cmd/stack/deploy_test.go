@@ -20,6 +20,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/okteto/okteto/pkg/build"
+	"github.com/okteto/okteto/pkg/divert"
 	"github.com/okteto/okteto/pkg/format"
 	"github.com/okteto/okteto/pkg/k8s/ingresses"
 	"github.com/okteto/okteto/pkg/k8s/services"
@@ -36,9 +38,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {
 				Name:      "test",
 				Namespace: "namespace",
@@ -81,7 +83,7 @@ func Test_deploySvc(t *testing.T) {
 					"test": {
 						Image:         "test_image",
 						RestartPolicy: apiv1.RestartPolicyAlways,
-						Volumes: []model.StackVolume{
+						Volumes: []build.VolumeMounts{
 							{
 								LocalPath:  "a",
 								RemotePath: "b",
@@ -110,9 +112,10 @@ func Test_deploySvc(t *testing.T) {
 		},
 	}
 
+	divertDriver := divert.NewNoop()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := deploySvc(ctx, tt.stack, tt.svcName, client)
+			err := deploySvc(ctx, tt.stack, tt.svcName, client, divertDriver)
 			if err != nil {
 				t.Fatal("Not deployed correctly")
 			}
@@ -191,7 +194,7 @@ func Test_reDeploySvc(t *testing.T) {
 					"serviceName": {
 						Image:         "test_image",
 						RestartPolicy: apiv1.RestartPolicyAlways,
-						Volumes: []model.StackVolume{
+						Volumes: []build.VolumeMounts{
 							{
 								LocalPath:  "a",
 								RemotePath: "b",
@@ -221,9 +224,10 @@ func Test_reDeploySvc(t *testing.T) {
 		},
 	}
 
+	divertDriver := divert.NewNoop()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := deploySvc(ctx, tt.stack, tt.svcName, fakeClient)
+			err := deploySvc(ctx, tt.stack, tt.svcName, fakeClient, divertDriver)
 			if err != nil {
 				t.Fatal("Not re-deployed correctly")
 			}
@@ -279,7 +283,8 @@ func Test_deployDeployment(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset()
 
-	_, err := deployDeployment(ctx, "test", stack, client)
+	divertDriver := divert.NewNoop()
+	_, err := deployDeployment(ctx, "test", stack, client, divertDriver)
 	if err != nil {
 		t.Fatal("Not deployed correctly")
 	}
@@ -299,7 +304,7 @@ func Test_deployVolumes(t *testing.T) {
 			"test": {
 				Image:         "test_image",
 				RestartPolicy: apiv1.RestartPolicyAlways,
-				Volumes: []model.StackVolume{
+				Volumes: []build.VolumeMounts{
 					{
 						LocalPath:  "a",
 						RemotePath: "b",
@@ -333,7 +338,7 @@ func Test_deploySfs(t *testing.T) {
 			"test": {
 				Image:         "test_image",
 				RestartPolicy: apiv1.RestartPolicyAlways,
-				Volumes: []model.StackVolume{
+				Volumes: []build.VolumeMounts{
 					{
 						LocalPath:  "a",
 						RemotePath: "b",
@@ -347,7 +352,8 @@ func Test_deploySfs(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset()
 
-	_, err := deployStatefulSet(ctx, "test", stack, client)
+	divertDriver := divert.NewNoop()
+	_, err := deployStatefulSet(ctx, "test", stack, client, divertDriver)
 	if err != nil {
 		t.Fatal("Not deployed correctly")
 	}
@@ -372,7 +378,8 @@ func Test_deployJob(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset()
 
-	_, err := deployJob(ctx, "test", stack, client)
+	divertDriver := divert.NewNoop()
+	_, err := deployJob(ctx, "test", stack, client, divertDriver)
 	if err != nil {
 		t.Fatal("Not deployed correctly")
 	}
@@ -503,7 +510,7 @@ func Test_AddSomeServices(t *testing.T) {
 				Namespace: "default",
 				Services: map[string]*model.Service{
 					"sfs-not-running": {
-						Volumes: []model.StackVolume{
+						Volumes: []build.VolumeMounts{
 							{
 								LocalPath:  "/",
 								RemotePath: "/",
@@ -589,7 +596,7 @@ func Test_AddSomeServices(t *testing.T) {
 				Namespace: "default",
 				Services: map[string]*model.Service{
 					"sfs": {
-						Volumes: []model.StackVolume{
+						Volumes: []build.VolumeMounts{
 							{
 								LocalPath:  "/",
 								RemotePath: "/",
@@ -638,7 +645,7 @@ func Test_AddSomeServices(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			options := &StackDeployOptions{ServicesToDeploy: tt.svcsToBeDeployed}
+			options := &DeployOptions{ServicesToDeploy: tt.svcsToBeDeployed}
 			options.ServicesToDeploy = AddDependentServicesIfNotPresent(ctx, tt.stack, options.ServicesToDeploy, fakeClient)
 
 			if !reflect.DeepEqual(tt.expectedSvcsToBeDeployed, options.ServicesToDeploy) {
@@ -654,9 +661,9 @@ func Test_getVolumesToDeployFromServicesToDeploy(t *testing.T) {
 		servicesToDeploy map[string]bool
 	}
 	tests := []struct {
-		name     string
 		args     args
 		expected map[string]bool
+		name     string
 	}{
 		{
 			name: "should return volumes from services to deploy",
@@ -668,7 +675,7 @@ func Test_getVolumesToDeployFromServicesToDeploy(t *testing.T) {
 				stack: &model.Stack{
 					Services: map[string]*model.Service{
 						"service ab": {
-							Volumes: []model.StackVolume{
+							Volumes: []build.VolumeMounts{
 								{
 									LocalPath: "volume a",
 								},
@@ -678,14 +685,14 @@ func Test_getVolumesToDeployFromServicesToDeploy(t *testing.T) {
 							},
 						},
 						"service b": {
-							Volumes: []model.StackVolume{
+							Volumes: []build.VolumeMounts{
 								{
 									LocalPath: "volume b",
 								},
 							},
 						},
 						"service bc": {
-							Volumes: []model.StackVolume{
+							Volumes: []build.VolumeMounts{
 								{
 									LocalPath: "volume b",
 								},
@@ -726,9 +733,9 @@ func Test_getEndpointsToDeployFromServicesToDeploy(t *testing.T) {
 		servicesToDeploy map[string]bool
 	}
 	tests := []struct {
-		name     string
 		args     args
 		expected map[string]bool
+		name     string
 	}{
 		{
 			name: "multiple endpoints",
@@ -775,10 +782,10 @@ func Test_getEndpointsToDeployFromServicesToDeploy(t *testing.T) {
 
 func TestDeployK8sService(t *testing.T) {
 	tests := []struct {
-		name              string
-		k8sObjects        []runtime.Object
 		stack             *model.Stack
+		name              string
 		expectedNameLabel string
+		k8sObjects        []runtime.Object
 	}{
 		{
 			name: "skip service",
@@ -864,10 +871,10 @@ func TestDeployK8sService(t *testing.T) {
 
 func TestGetErrorDueToRestartLimit(t *testing.T) {
 	tests := []struct {
+		err        error
+		stack      *model.Stack
 		name       string
 		k8sObjects []runtime.Object
-		stack      *model.Stack
-		err        error
 	}{
 		{
 			name: "no dependent services",

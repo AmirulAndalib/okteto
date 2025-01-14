@@ -70,7 +70,7 @@ services:
     environment:
     - RABBITMQ_PASS
   nginx:
-    image: nginx
+    build: nginx
     volumes:
     - ./nginx/nginx.conf:/tmp/nginx.conf
     command: /bin/bash -c "envsubst < /tmp/nginx.conf > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
@@ -103,7 +103,7 @@ services:
     environment:
     - RABBITMQ_PASS
   nginx:
-    image: nginx
+    build: nginx
     volumes:
     - ./nginx/nginx.conf:/tmp/nginx.conf
     command: /bin/bash -c "envsubst < /tmp/nginx.conf > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
@@ -149,15 +149,16 @@ func Test_EndpointsFromOktetoManifest_InferredName(t *testing.T) {
 	require.NoError(t, createAppDockerfile(dir))
 	require.NoError(t, createK8sManifest(dir))
 
-	testNamespace := integration.GetTestNamespace("EndpointManifestInfer", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 	c, _, err := okteto.NewK8sClientProvider().Provide(kubeconfig.Get([]string{filepath.Join(dir, ".kube", "config")}))
 	require.NoError(t, err)
 
@@ -187,6 +188,7 @@ func Test_EndpointsFromOktetoManifest_InferredName(t *testing.T) {
 
 	_, err = integration.GetService(context.Background(), testNamespace, "e2etest", c)
 	require.True(t, k8sErrors.IsNotFound(err))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func createEndpointsFromOktetoManifestInferredName(dir string) error {
@@ -212,15 +214,16 @@ func Test_EndpointsFromOktetoManifest_Name(t *testing.T) {
 	require.NoError(t, createAppDockerfile(dir))
 	require.NoError(t, createK8sManifest(dir))
 
-	testNamespace := integration.GetTestNamespace("EndpointsManifest", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 
 	deployOptions := &commands.DeployOptions{
 		Workdir:    dir,
@@ -245,6 +248,7 @@ func Test_EndpointsFromOktetoManifest_Name(t *testing.T) {
 		OktetoHome: dir,
 	}
 	require.NoError(t, commands.RunOktetoDestroy(oktetoPath, destroyOptions))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func createEndpointsFromOktetoManifestName(dir string) error {
@@ -267,15 +271,16 @@ func Test_EndpointsFromStackWith_InferredName(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, createStackWithEndpointsInferredNameScenario(dir))
 
-	testNamespace := integration.GetTestNamespace("TEndpointsFromStackInfer", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 
 	deployOptions := &commands.DeployOptions{
 		Workdir:    dir,
@@ -296,6 +301,7 @@ func Test_EndpointsFromStackWith_InferredName(t *testing.T) {
 		OktetoHome: dir,
 	}
 	require.NoError(t, commands.RunOktetoDestroy(oktetoPath, destroyOptions))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func createStackWithEndpointsInferredNameScenario(dir string) error {
@@ -306,6 +312,10 @@ func createStackWithEndpointsInferredNameScenario(dir string) error {
 	nginxPath := filepath.Join(dir, "nginx", "nginx.conf")
 	nginxContent := []byte(nginxConf)
 	if err := os.WriteFile(nginxPath, nginxContent, 0600); err != nil {
+		return err
+	}
+
+	if err := createNginxDockerfile(dir); err != nil {
 		return err
 	}
 
@@ -333,15 +343,16 @@ func Test_EndpointsFromStack_Name(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, createStackWithEndpointsNameScenario(dir))
 
-	testNamespace := integration.GetTestNamespace("TEndpointsFromStack", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 
 	deployOptions := &commands.DeployOptions{
 		Workdir:    dir,
@@ -361,6 +372,7 @@ func Test_EndpointsFromStack_Name(t *testing.T) {
 		OktetoHome: dir,
 	}
 	require.NoError(t, commands.RunOktetoDestroy(oktetoPath, destroyOptions))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func createStackWithEndpointsNameScenario(dir string) error {
@@ -371,6 +383,10 @@ func createStackWithEndpointsNameScenario(dir string) error {
 	nginxPath := filepath.Join(dir, "nginx", "nginx.conf")
 	nginxContent := []byte(nginxConf)
 	if err := os.WriteFile(nginxPath, nginxContent, 0600); err != nil {
+		return err
+	}
+
+	if err := createNginxDockerfile(dir); err != nil {
 		return err
 	}
 
@@ -399,15 +415,16 @@ func Test_EndpointsFromStackAndManifest(t *testing.T) {
 	require.NoError(t, createStackWithEndpointsNameScenario(dir))
 	require.NoError(t, writeFile(filepath.Join(dir, "okteto.yml"), oktetoManifestV2WithComposeWithEndpoints))
 
-	testNamespace := integration.GetTestNamespace("EndpointsStackAndManif", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 
 	deployOptions := &commands.DeployOptions{
 		Workdir:    dir,
@@ -427,6 +444,7 @@ func Test_EndpointsFromStackAndManifest(t *testing.T) {
 		OktetoHome: dir,
 	}
 	require.NoError(t, commands.RunOktetoDestroy(oktetoPath, destroyOptions))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 // Test_EndpointsFromOktetoManifest_NameOption tests the following scenario:
@@ -443,15 +461,16 @@ func Test_EndpointsFromOktetoManifest_NameOption(t *testing.T) {
 	require.NoError(t, createAppDockerfile(dir))
 	require.NoError(t, createK8sManifest(dir))
 
-	testNamespace := integration.GetTestNamespace("EndpointManifestNameOp", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 	c, _, err := okteto.NewK8sClientProvider().Provide(kubeconfig.Get([]string{filepath.Join(dir, ".kube", "config")}))
 	require.NoError(t, err)
 
@@ -482,6 +501,7 @@ func Test_EndpointsFromOktetoManifest_NameOption(t *testing.T) {
 
 	_, err = integration.GetService(context.Background(), testNamespace, "e2etest", c)
 	require.True(t, k8sErrors.IsNotFound(err))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 // Test_EndpointsFromStackWithEndpoints_InferredName tests the following scenario:
@@ -495,15 +515,16 @@ func Test_EndpointsFromStackWith_NameOption(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, createStackWithEndpointsInferredNameScenario(dir))
 
-	testNamespace := integration.GetTestNamespace("TEpStackNameOpt", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 
 	deployOptions := &commands.DeployOptions{
 		Workdir:    dir,
@@ -525,4 +546,5 @@ func Test_EndpointsFromStackWith_NameOption(t *testing.T) {
 		Name:       "my test",
 	}
 	require.NoError(t, commands.RunOktetoDestroy(oktetoPath, destroyOptions))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }

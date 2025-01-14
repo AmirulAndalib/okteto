@@ -16,7 +16,13 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"strings"
+	"text/tabwriter"
+
 	contextCMD "github.com/okteto/okteto/cmd/context"
 	"github.com/okteto/okteto/cmd/utils"
 	"github.com/okteto/okteto/pkg/constants"
@@ -27,21 +33,17 @@ import (
 	"github.com/okteto/okteto/pkg/repository"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
-	"io"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
-	"os"
-	"strings"
-	"text/tabwriter"
 )
 
 type listFlags struct {
-	labels    []string
 	context   string
 	namespace string
 	output    string
+	labels    []string
 }
 
 type pipelineListItem struct {
@@ -57,57 +59,36 @@ func list(ctx context.Context) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List all okteto pipelines",
+		Short: "List all your Development Environments in the current Okteto Namespace",
 		Args:  utils.NoArgsAccepted(""),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return pipelineListCommandHandler(ctx, flags, contextCMD.NewContextCommand().Run)
 		},
 	}
 
-	cmd.Flags().StringVarP(&flags.context, "context", "c", "", "context where the pipelines are deployed (defaults to the current context)")
-	cmd.Flags().StringArrayVarP(&flags.labels, "label", "", []string{}, "tag and organize dev environments using labels (multiple --label flags accepted)")
-	cmd.Flags().StringVarP(&flags.namespace, "namespace", "n", "", "namespace where the pipelines are deployed (defaults to the current namespace)")
+	cmd.Flags().StringVarP(&flags.context, "context", "c", "", "overwrite the current Okteto Context")
+	cmd.Flags().StringArrayVarP(&flags.labels, "label", "", []string{}, "tag and organize Development Environments using labels (multiple --label flags accepted)")
+	cmd.Flags().StringVarP(&flags.namespace, "namespace", "n", "", "overwrite the current Okteto Namespace")
 	cmd.Flags().StringVarP(&flags.output, "output", "o", "", "output format. One of: ['json', 'yaml']")
 	return cmd
 }
 
 // pipelineListCommandHandler prepares the right okteto context depending on the provided flags and then calls the actual function that lists pipelines
 func pipelineListCommandHandler(ctx context.Context, flags *listFlags, initOkCtx initOkCtxFn) error {
-	ctxResource := &model.ContextResource{}
-	ctxOptions := &contextCMD.ContextOptions{
-		Show: false,
+	ctxOptions := &contextCMD.Options{
+		Context:   flags.context,
+		Namespace: flags.namespace,
+		Show:      flags.output == "",
 	}
-	if flags.output == "" {
-		ctxOptions.Show = true
-	}
-
-	if flags.context != "" {
-		if err := ctxResource.UpdateContext(flags.context); err != nil {
-			return err
-		}
-	}
-
-	if flags.namespace != "" {
-		if err := ctxResource.UpdateNamespace(flags.namespace); err != nil {
-			return err
-		}
-	}
-
-	ctxOptions.Context = ctxResource.Context
-	ctxOptions.Namespace = ctxResource.Namespace
 
 	if err := initOkCtx(ctx, ctxOptions); err != nil {
 		return err
 	}
 
-	okCtx := okteto.Context()
+	okCtx := okteto.GetContext()
 
 	if !okCtx.IsOkteto {
 		return oktetoErrors.ErrContextIsNotOktetoCluster
-	}
-
-	if flags.namespace == "" {
-		flags.namespace = okCtx.Namespace
 	}
 
 	pc, err := NewCommand()
@@ -116,24 +97,24 @@ func pipelineListCommandHandler(ctx context.Context, flags *listFlags, initOkCtx
 	}
 	c, _, err := pc.k8sClientProvider.Provide(okCtx.Cfg)
 	if err != nil {
-		return fmt.Errorf("failed to load okteto context '%s': %v", okCtx.Name, err)
+		return fmt.Errorf("failed to load okteto context '%s': %w", okCtx.Name, err)
 	}
 
-	return executeListPipelines(ctx, *flags, configmaps.List, getPipelineListOutput, c, os.Stdout)
+	return executeListPipelines(ctx, *flags, okCtx.Namespace, configmaps.List, getPipelineListOutput, c, os.Stdout)
 }
 
-type initOkCtxFn func(ctx context.Context, ctxOptions *contextCMD.ContextOptions) error
+type initOkCtxFn func(ctx context.Context, ctxOptions *contextCMD.Options) error
 type getPipelineListOutputFn func(ctx context.Context, listPipelines listPipelinesFn, namespace, labelSelector string, c kubernetes.Interface) ([]pipelineListItem, error)
 type listPipelinesFn func(ctx context.Context, namespace, labelSelector string, c kubernetes.Interface) ([]apiv1.ConfigMap, error)
 
 // executeListPipelines is responsible for output management and calling the function that lists pipelines
-func executeListPipelines(ctx context.Context, opts listFlags, listPipelines listPipelinesFn, getPipelineListOutput getPipelineListOutputFn, c kubernetes.Interface, w io.Writer) error {
+func executeListPipelines(ctx context.Context, opts listFlags, namespace string, listPipelines listPipelinesFn, getPipelineListOutput getPipelineListOutputFn, c kubernetes.Interface, w io.Writer) error {
 	labelSelector, err := getLabelSelector(opts.labels)
 	if err != nil {
 		return err
 	}
 
-	pipelineListOutput, err := getPipelineListOutput(ctx, listPipelines, opts.namespace, labelSelector, c)
+	pipelineListOutput, err := getPipelineListOutput(ctx, listPipelines, namespace, labelSelector, c)
 	if err != nil {
 		return err
 	}
@@ -182,7 +163,7 @@ func getLabelSelector(labels []string) (string, error) {
 		}
 		errs := validation.IsValidLabelValue(label)
 		if len(errs) > 0 {
-			return "", fmt.Errorf("invalid label '%s': %v", label, errs[0])
+			return "", fmt.Errorf("invalid label '%s': %w", label, errors.New(errs[0]))
 		}
 		labelSelector = append(labelSelector, fmt.Sprintf("%s/%s", constants.EnvironmentLabelKeyPrefix, label))
 	}

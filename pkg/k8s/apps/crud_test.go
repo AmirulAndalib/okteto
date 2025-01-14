@@ -29,9 +29,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {
 				Name:      "test",
 				Namespace: "namespace",
@@ -69,11 +69,8 @@ func TestGetStatefulset(t *testing.T) {
 	clientset := fake.NewSimpleClientset(sfs)
 
 	dev := &model.Dev{
-		Name:      "test",
-		Namespace: "test",
-		Image: &model.BuildInfo{
-			Name: "image",
-		},
+		Name:  "test",
+		Image: "image",
 		PersistentVolumeInfo: &model.PersistentVolumeInfo{
 			Enabled: true,
 		},
@@ -114,11 +111,8 @@ func TestGetDeployment(t *testing.T) {
 	clientset := fake.NewSimpleClientset(d)
 
 	dev := &model.Dev{
-		Name:      "test",
-		Namespace: "test",
-		Image: &model.BuildInfo{
-			Name: "image",
-		},
+		Name:  "test",
+		Image: "image",
 		PersistentVolumeInfo: &model.PersistentVolumeInfo{
 			Enabled: true,
 		},
@@ -134,9 +128,9 @@ func TestGetDeployment(t *testing.T) {
 
 func TestValidateMountPaths(t *testing.T) {
 	tests := []struct {
-		name          string
 		spec          *v1.PodSpec
 		dev           *model.Dev
+		name          string
 		expectedError bool
 	}{
 		{
@@ -271,35 +265,25 @@ func TestValidateMountPaths(t *testing.T) {
 
 func TestListDevModeOn(t *testing.T) {
 	manifest := &model.Manifest{
-		Name:      "manifest-name",
-		Namespace: "test",
+		Name: "manifest-name",
 		Dev: model.ManifestDevs{
 			"dev": &model.Dev{
-				Name:      "dev",
-				Namespace: "test",
-				Image: &model.BuildInfo{
-					Name: "image",
-				},
+				Name:  "dev",
+				Image: "image",
 				PersistentVolumeInfo: &model.PersistentVolumeInfo{
 					Enabled: true,
 				},
 			},
 			"sfs": &model.Dev{
-				Name:      "sfs",
-				Namespace: "test",
-				Image: &model.BuildInfo{
-					Name: "image",
-				},
+				Name:  "sfs",
+				Image: "image",
 				PersistentVolumeInfo: &model.PersistentVolumeInfo{
 					Enabled: true,
 				},
 			},
 			"autocreate": &model.Dev{
-				Name:      "autocreate",
-				Namespace: "test",
-				Image: &model.BuildInfo{
-					Name: "image",
-				},
+				Name:  "autocreate",
+				Image: "image",
 				PersistentVolumeInfo: &model.PersistentVolumeInfo{
 					Enabled: true,
 				},
@@ -308,11 +292,11 @@ func TestListDevModeOn(t *testing.T) {
 		},
 	}
 	tests := []struct {
-		name          string
+		expectedError error
 		sfs           *appsv1.StatefulSet
 		ds            *appsv1.Deployment
+		name          string
 		expectedList  []string
-		expectedError error
 	}{
 		{
 			name: "none-dev-mode",
@@ -554,7 +538,7 @@ func TestListDevModeOn(t *testing.T) {
 		ctx := context.Background()
 		clientset := fake.NewSimpleClientset(tt.sfs, tt.ds)
 
-		result := ListDevModeOn(ctx, manifest, clientset)
+		result := ListDevModeOn(ctx, manifest.Dev, "test", clientset)
 		assert.ElementsMatch(t, tt.expectedList, result)
 
 	}

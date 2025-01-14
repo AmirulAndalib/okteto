@@ -22,9 +22,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
+	"github.com/okteto/okteto/pkg/config"
 	"github.com/okteto/okteto/pkg/constants"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	oktetoHttp "github.com/okteto/okteto/pkg/http"
@@ -34,8 +36,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// OktetoClient implementation to connect to Okteto API
-type OktetoClient struct {
+// Client implementation to connect to Okteto API
+type Client struct {
 	client graphqlClientInterface
 
 	namespace types.NamespaceInterface
@@ -44,14 +46,20 @@ type OktetoClient struct {
 	pipeline  types.PipelineInterface
 	stream    types.StreamInterface
 	kubetoken types.KubetokenInterface
+	endpoint  types.EndpointClientInterface
 }
 
-type OktetoClientProvider struct{}
+type ClientProvider struct{}
 
 var insecureSkipTLSVerify bool
+var onceInsecureWarning *sync.Once = &sync.Once{}
 var serverName string
 var strictTLSOnce sync.Once
 var errURLNotSet = errors.New("the okteto URL is not set")
+
+const unauthorizedTokenPattern = `^non-200 OK status code: 401 Unauthorized body: "fail to find user with token [A-Za-z0-9]+: not-authorized\\n"$`
+
+var unauthorizedTokenRegex = regexp.MustCompile(unauthorizedTokenPattern)
 
 // graphqlClientInterface contains the functions that a graphqlClient must have
 type graphqlClientInterface interface {
@@ -59,11 +67,11 @@ type graphqlClientInterface interface {
 	Mutate(ctx context.Context, m interface{}, variables map[string]interface{}) error
 }
 
-func NewOktetoClientProvider() *OktetoClientProvider {
-	return &OktetoClientProvider{}
+func NewOktetoClientProvider() *ClientProvider {
+	return &ClientProvider{}
 }
 
-func (*OktetoClientProvider) Provide(opts ...Option) (types.OktetoInterface, error) {
+func (*ClientProvider) Provide(opts ...Option) (types.OktetoInterface, error) {
 	c, err := NewOktetoClient(opts...)
 	if err != nil {
 		return nil, err
@@ -71,55 +79,70 @@ func (*OktetoClientProvider) Provide(opts ...Option) (types.OktetoInterface, err
 	return c, err
 }
 
-type oktetoClientCfg struct {
-	ctxName string
-	token   string
+type ClientCfg struct {
+	CtxName string
+	Token   string
+	Cert    string
 }
 
 func WithCtxName(ctxName string) Option {
-	return func(cfg *oktetoClientCfg) {
-		cfg.ctxName = ctxName
+	return func(cfg *ClientCfg) {
+		cfg.CtxName = ctxName
 	}
 }
 
 func WithToken(token string) Option {
-	return func(cfg *oktetoClientCfg) {
-		cfg.token = token
+	return func(cfg *ClientCfg) {
+		cfg.Token = token
 	}
 }
 
-func defaultOktetoClientCfg() *oktetoClientCfg {
+func defaultOktetoClientCfg() *ClientCfg {
 	if CurrentStore == nil && !ContextExists() {
-		return &oktetoClientCfg{}
+		return &ClientCfg{}
 	}
 	if CurrentStore != nil && CurrentStore.CurrentContext == "" {
-		return &oktetoClientCfg{}
+		return &ClientCfg{}
 	}
-	return &oktetoClientCfg{
-		ctxName: Context().Name,
-		token:   Context().Token,
+	return &ClientCfg{
+		CtxName: GetContext().Name,
+		Token:   GetContext().Token,
 	}
 
 }
 
-type Option func(*oktetoClientCfg)
+type Option func(*ClientCfg)
 
 // NewOktetoClient creates a new client to connect with Okteto API
-func NewOktetoClient(opts ...Option) (*OktetoClient, error) {
+func NewOktetoClient(opts ...Option) (*Client, error) {
 	cfg := defaultOktetoClientCfg()
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
-	if cfg.token == "" {
-		okCtx, exists := ContextStore().Contexts[cfg.ctxName]
+	if cfg.Token == "" {
+		okCtx, exists := GetContextStore().Contexts[cfg.CtxName]
 		if !exists {
-			return nil, fmt.Errorf("%s context doesn't exists", cfg.ctxName)
+			return nil, fmt.Errorf("%s context doesn't exists", cfg.CtxName)
 		}
-		cfg.token = okCtx.Token
+		cfg.Token = okCtx.Token
 	}
 
-	httpClient, u, err := newOktetoHttpClient(cfg.ctxName, cfg.token, "graphql")
+	httpClient, u, err := newOktetoHttpClient(cfg.CtxName, cfg.Token, "graphql")
+	if err != nil {
+		return nil, err
+	}
+
+	return newOktetoClientFromGraphqlClient(u, httpClient)
+}
+
+// NewOktetoClientStateless creates a new client to connect with Okteto API
+func NewOktetoClientStateless(ocfg *ClientCfg, opts ...Option) (*Client, error) {
+	for _, opt := range opts {
+		opt(ocfg)
+	}
+
+	httpClient, u, err := newOktetoHttpClientStateless(ocfg.CtxName, ocfg.Token, ocfg.Cert, "graphql")
 	if err != nil {
 		return nil, err
 	}
@@ -160,12 +183,57 @@ func newOktetoHttpClient(contextName, token, oktetoUrlPath string) (*http.Client
 	ctx := contextWithOauth2HttpClient(context.Background(), ctxHttpClient)
 
 	httpClient := oauth2.NewClient(ctx, src)
+	httpClient.Transport = &VersionedTransport{
+		Version:      config.VersionString,
+		RoundTripper: httpClient.Transport,
+	}
+
+	return httpClient, u, err
+}
+
+func newOktetoHttpClientStateless(contextName, token, cert, oktetoUrlPath string) (*http.Client, string, error) {
+	if token == "" {
+		return nil, "", fmt.Errorf(oktetoErrors.ErrNotLogged, contextName)
+	}
+	u, err := parseOktetoURLWithPath(contextName, oktetoUrlPath)
+	if err != nil {
+		return nil, "", err
+	}
+
+	src := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: token,
+			TokenType: "Bearer"},
+	)
+
+	sslTransportOption := &oktetoHttp.SSLTransportOption{}
+
+	if serverName != "" {
+		sslTransportOption.ServerName = serverName
+		sslTransportOption.URLsToIntercept = []string{u}
+	}
+
+	ctxHttpClient := oktetoHttp.StrictSSLHTTPClient(sslTransportOption)
+
+	if insecureSkipTLSVerify {
+		ctxHttpClient = oktetoHttp.InsecureHTTPClient()
+	} else if cert, err := GetContextCertificateStateless(cert); err == nil {
+		sslTransportOption.Certs = []*x509.Certificate{cert}
+		ctxHttpClient = oktetoHttp.StrictSSLHTTPClient(sslTransportOption)
+	}
+
+	ctx := contextWithOauth2HttpClient(context.Background(), ctxHttpClient)
+
+	httpClient := oauth2.NewClient(ctx, src)
+	httpClient.Transport = &VersionedTransport{
+		Version:      config.VersionString,
+		RoundTripper: httpClient.Transport,
+	}
 
 	return httpClient, u, err
 }
 
 // NewOktetoClientFromUrlAndToken creates a new client to connect with Okteto API provided url and token
-func NewOktetoClientFromUrlAndToken(url, token string) (*OktetoClient, error) {
+func NewOktetoClientFromUrlAndToken(url, token string) (*Client, error) {
 	u, err := parseOktetoURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("could not create okteto client: %w", err)
@@ -195,12 +263,15 @@ func NewOktetoClientFromUrlAndToken(url, token string) (*OktetoClient, error) {
 	ctx := contextWithOauth2HttpClient(context.Background(), ctxHttpClient)
 
 	httpClient := oauth2.NewClient(ctx, src)
-
+	httpClient.Transport = &VersionedTransport{
+		Version:      config.VersionString,
+		RoundTripper: httpClient.Transport,
+	}
 	return newOktetoClientFromGraphqlClient(u, httpClient)
 }
 
 // NewOktetoClientFromUrl creates a new client to connect with Okteto API provided an url
-func NewOktetoClientFromUrl(url string) (*OktetoClient, error) {
+func NewOktetoClientFromUrl(url string) (*Client, error) {
 	u, err := parseOktetoURL(url)
 	if err != nil {
 		return nil, err
@@ -225,7 +296,10 @@ func NewOktetoClientFromUrl(url string) (*OktetoClient, error) {
 	ctx := contextWithOauth2HttpClient(context.Background(), ctxHttpClient)
 
 	httpClient := oauth2.NewClient(ctx, nil)
-
+	httpClient.Transport = &VersionedTransport{
+		Version:      config.VersionString,
+		RoundTripper: httpClient.Transport,
+	}
 	return newOktetoClientFromGraphqlClient(u, httpClient)
 }
 
@@ -238,8 +312,8 @@ func contextWithOauth2HttpClient(ctx context.Context, httpClient *http.Client) c
 	)
 }
 
-func newOktetoClientFromGraphqlClient(url string, httpClient *http.Client) (*OktetoClient, error) {
-	c := &OktetoClient{
+func newOktetoClientFromGraphqlClient(url string, httpClient *http.Client) (*Client, error) {
+	c := &Client{
 		client: graphql.NewClient(url, httpClient),
 	}
 	c.namespace = newNamespaceClient(c.client)
@@ -248,6 +322,7 @@ func newOktetoClientFromGraphqlClient(url string, httpClient *http.Client) (*Okt
 	c.pipeline = newPipelineClient(c.client, url)
 	c.stream = newStreamClient(httpClient)
 	c.kubetoken = newKubeTokenClient(httpClient)
+	c.endpoint = newEndpointClient(c.client)
 	return c, nil
 }
 
@@ -278,7 +353,7 @@ func translateAPIErr(err error) error {
 	e := strings.TrimPrefix(err.Error(), "graphql: ")
 	switch e {
 	case "not-authorized":
-		return fmt.Errorf(oktetoErrors.ErrNotLogged, Context().Name)
+		return fmt.Errorf(oktetoErrors.ErrNotLogged, GetContext().Name)
 	case "namespace-quota-exceeded":
 		return fmt.Errorf("you have exceeded your namespace quota. Contact us at hello@okteto.com to learn more")
 	case "namespace-quota-exceeded-onpremises":
@@ -289,10 +364,20 @@ func translateAPIErr(err error) error {
 		return fmt.Errorf("server temporarily unavailable, please try again")
 	case "non-200 OK status code: 401 Unauthorized body: \"\"":
 		return fmt.Errorf("unauthorized. Please run 'okteto context url' and try again")
+	case "non-200 OK status code: 401 Unauthorized body: \"not-authorized\\n\"":
+		return fmt.Errorf(oktetoErrors.ErrNotLogged, GetContext().Name)
+	case "non-200 OK status code: 401 Unauthorized body: \"not-authorized: token is expired\\n\"":
+		return oktetoErrors.ErrTokenExpired
 	case "not-found":
 		return oktetoErrors.ErrNotFound
+	case "namespace-not-found":
+		return oktetoErrors.ErrNamespaceNotFound
 
 	default:
+		if unauthorizedTokenRegex.MatchString(err.Error()) {
+			return fmt.Errorf(oktetoErrors.ErrNotLogged, GetContext().Name)
+		}
+
 		switch {
 		case oktetoErrors.IsX509(err):
 			return oktetoErrors.UserError{
@@ -309,7 +394,6 @@ func translateAPIErr(err error) error {
 		oktetoLog.Infof("Unrecognized API error: %s", err)
 		return err
 	}
-
 }
 
 func isAPILicenseError(err error) bool {
@@ -374,41 +458,48 @@ func mutate(ctx context.Context, mutation interface{}, variables map[string]inte
 }
 
 // Namespaces retrieves the NamespaceClient
-func (c *OktetoClient) Namespaces() types.NamespaceInterface {
+func (c *Client) Namespaces() types.NamespaceInterface {
 	return c.namespace
 }
 
 // Previews retrieves the Previews client
-func (c *OktetoClient) Previews() types.PreviewInterface {
+func (c *Client) Previews() types.PreviewInterface {
 	return c.preview
 }
 
 // Pipeline retrieves the Pipeline client
-func (c *OktetoClient) Pipeline() types.PipelineInterface {
+func (c *Client) Pipeline() types.PipelineInterface {
 	return c.pipeline
 }
 
 // User retrieves the UserClient
-func (c *OktetoClient) User() types.UserInterface {
+func (c *Client) User() types.UserInterface {
 	return c.user
 }
 
 // Stream retrieves the Stream client
-func (c *OktetoClient) Stream() types.StreamInterface {
+func (c *Client) Stream() types.StreamInterface {
 	return c.stream
 }
 
 // Kubetoken retrieves the Kubetoken client
-func (c *OktetoClient) Kubetoken() types.KubetokenInterface {
+func (c *Client) Kubetoken() types.KubetokenInterface {
 	return c.kubetoken
 }
 
+// Endpoint retrieves the Endpoint client
+func (c *Client) Endpoint() types.EndpointClientInterface {
+	return c.endpoint
+}
+
 func SetInsecureSkipTLSVerifyPolicy(isInsecure bool) {
-	oktetoLog.Debugf("insecure mode: %t", isInsecure)
-	if isInsecure {
-		oktetoLog.Warning("Insecure mode enabled")
-	}
-	insecureSkipTLSVerify = isInsecure
+	onceInsecureWarning.Do(func() {
+		oktetoLog.Debugf("insecure mode: %t", isInsecure)
+		if isInsecure {
+			oktetoLog.Warning("Insecure mode enabled")
+		}
+		insecureSkipTLSVerify = isInsecure
+	})
 }
 
 func IsInsecureSkipTLSVerifyPolicy() bool {
@@ -431,4 +522,14 @@ func SetServerNameOverride(serverNameOverride string) {
 
 func GetServerNameOverride() string {
 	return serverName
+}
+
+type VersionedTransport struct {
+	http.RoundTripper
+	Version string
+}
+
+func (t *VersionedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Add("X-Okteto-CLI-Version", t.Version)
+	return t.RoundTripper.RoundTrip(req)
 }

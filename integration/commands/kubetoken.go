@@ -16,15 +16,16 @@ package commands
 import (
 	"bytes"
 	"fmt"
-	"github.com/okteto/okteto/pkg/constants"
-	"github.com/okteto/okteto/pkg/model"
 	"log"
 	"os"
 	"os/exec"
+
+	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/model"
 )
 
 // RunOktetoKubetoken runs okteto kubetoken command
-func RunOktetoKubetoken(oktetoPath, oktetoHome string) (bytes.Buffer, error) {
+func RunOktetoKubetoken(oktetoPath, oktetoHome, token string) (bytes.Buffer, error) {
 	args := []string{"kubetoken"}
 	cmd := exec.Command(oktetoPath, args...)
 
@@ -34,6 +35,9 @@ func RunOktetoKubetoken(oktetoPath, oktetoHome string) (bytes.Buffer, error) {
 	}
 	if oktetoHome != "" {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", constants.OktetoHomeEnvVar, oktetoHome))
+	}
+	if token != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", model.OktetoTokenEnvVar, token))
 	}
 
 	var out bytes.Buffer

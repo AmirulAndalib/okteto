@@ -34,10 +34,9 @@ import (
 )
 
 var (
-	user            = ""
 	token           = ""
 	kubectlBinary   = "kubectl"
-	appsSubdomain   = "cloud.okteto.net"
+	appsSubdomain   = ""
 	ErrUpNotRunning = errors.New("Up command is no longer running")
 )
 
@@ -49,13 +48,6 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	if u, ok := os.LookupEnv(model.OktetoUserEnvVar); !ok {
-		log.Println("OKTETO_USER is not defined")
-		os.Exit(1)
-	} else {
-		user = u
-	}
-
 	if v := os.Getenv(model.OktetoAppsSubdomainEnvVar); v != "" {
 		appsSubdomain = v
 	}
@@ -80,13 +72,14 @@ func writeFile(filepath, content string) error {
 	return nil
 }
 
-func checkStignoreIsOnRemote(namespace, manifestPath, oktetoPath, dir string) error {
+func checkStignoreIsOnRemote(namespace, svcName, manifestPath, oktetoPath, dir string) error {
 	opts := &commands.ExecOptions{
 		Namespace:    namespace,
 		ManifestPath: manifestPath,
-		Command:      "cat .stignore | grep '(?d)venv'",
+		Command:      []string{"sh", "-c", `cat .stignore | grep '(?d)venv'`},
 		OktetoHome:   dir,
 		Token:        token,
+		Service:      svcName,
 	}
 	output, err := commands.RunExecCommand(oktetoPath, opts)
 	if err != nil {

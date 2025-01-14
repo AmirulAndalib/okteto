@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package forward
 
 import (
@@ -6,12 +19,12 @@ import (
 	"strings"
 )
 
-type ForwardRaw struct {
+type Raw struct {
+	Labels      map[string]string `json:"labels" yaml:"labels"`
+	ServiceName string            `json:"name" yaml:"name"`
 	Local       int               `json:"localPort" yaml:"localPort"`
 	Remote      int               `json:"remotePort" yaml:"remotePort"`
 	Service     bool              `json:"-" yaml:"-"`
-	ServiceName string            `json:"name" yaml:"name"`
-	Labels      map[string]string `json:"labels" yaml:"labels"`
 }
 
 // UnmarshalYAML Implements the Unmarshaler interface of the yaml pkg for port forwards.
@@ -26,8 +39,10 @@ func (f *Forward) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return f.UnmarshalExtendedForm(unmarshal)
 	}
 
+	maxForwardParts := 3
+	minForwardParts := 2
 	parts := strings.Split(raw, ":")
-	if len(parts) < 2 || len(parts) > 3 {
+	if len(parts) < minForwardParts || len(parts) > maxForwardParts {
 		return fmt.Errorf(MalformedPortForward, raw)
 	}
 
@@ -37,7 +52,7 @@ func (f *Forward) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 	f.Local = localPort
 
-	if len(parts) == 2 {
+	if len(parts) == minForwardParts {
 		p, err := strconv.Atoi(parts[1])
 		if err != nil {
 			return fmt.Errorf(MalformedPortForward, raw)
@@ -64,7 +79,7 @@ func (f Forward) MarshalYAML() (interface{}, error) {
 }
 
 func (f *Forward) UnmarshalExtendedForm(unmarshal func(interface{}) error) error {
-	var rawForward ForwardRaw
+	var rawForward Raw
 	err := unmarshal(&rawForward)
 	if err != nil {
 		return err

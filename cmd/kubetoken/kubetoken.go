@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	contextCMD "github.com/okteto/okteto/cmd/context"
+	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/types"
@@ -28,8 +29,8 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
-// KubetokenFlags represents the flags available for kubetoken
-type KubetokenFlags struct {
+// Flags represents the flags available for kubetoken
+type Flags struct {
 	Namespace string
 	Context   string
 }
@@ -46,7 +47,7 @@ type k8sClientProvider interface {
 
 // oktetoCtxCmdRunner runs the okteto context command
 type oktetoCtxCmdRunner interface {
-	Run(ctx context.Context, ctxOptions *contextCMD.ContextOptions) error
+	RunStateless(ctx context.Context, ctxOptions *contextCMD.Options) (*okteto.ContextStateless, error)
 }
 
 type Serializer struct{}
@@ -59,31 +60,31 @@ func (*Serializer) ToJson(kubetoken types.KubeTokenResponse) (string, error) {
 	return string(bytes), nil
 }
 
-type initCtxOptsFunc func(string, string) *contextCMD.ContextOptions
+type initCtxOptsFunc func(string, string) *contextCMD.Options
 
-// KubetokenCmd generates a kubernetes token for a given namespace
-type KubetokenCmd struct {
+// Cmd generates a kubernetes token for a given namespace
+type Cmd struct {
 	k8sClientProvider    k8sClientProvider
 	oktetoClientProvider oktetoClientProvider
-	ctxStore             *okteto.OktetoContextStore
+	ctxStore             *okteto.ContextStore
 	oktetoCtxCmdRunner   oktetoCtxCmdRunner
 	serializer           *Serializer
 	initCtxFunc          initCtxOptsFunc
 }
 
-// KubetokenOptions represents the options for kubetoken
-type KubetokenOptions struct {
+// Options represents the options for kubetoken
+type Options struct {
 	oktetoClientProvider oktetoClientProvider
 	k8sClientProvider    k8sClientProvider
-	ctxStore             *okteto.OktetoContextStore
+	ctxStore             *okteto.ContextStore
 	oktetoCtxCmdRunner   oktetoCtxCmdRunner
 	serializer           *Serializer
 	getCtxResource       initCtxOptsFunc
 }
 
-func defaultKubetokenOptions() *KubetokenOptions {
-	ctxStore := okteto.ContextStore()
-	return &KubetokenOptions{
+func defaultKubetokenOptions() *Options {
+	ctxStore := okteto.GetContextStore()
+	return &Options{
 		oktetoClientProvider: okteto.NewOktetoClientProvider(),
 		k8sClientProvider:    okteto.NewK8sClientProvider(),
 		oktetoCtxCmdRunner:   contextCMD.NewContextCommand(),
@@ -93,15 +94,15 @@ func defaultKubetokenOptions() *KubetokenOptions {
 	}
 }
 
-type kubetokenOption func(*KubetokenOptions)
+type kubetokenOption func(*Options)
 
 // NewKubetokenCmd returns a new cobra command
-func NewKubetokenCmd(optFunc ...kubetokenOption) *KubetokenCmd {
+func NewKubetokenCmd(optFunc ...kubetokenOption) *Cmd {
 	opts := defaultKubetokenOptions()
 	for _, o := range optFunc {
 		o(opts)
 	}
-	return &KubetokenCmd{
+	return &Cmd{
 		oktetoClientProvider: opts.oktetoClientProvider,
 		serializer:           opts.serializer,
 		k8sClientProvider:    opts.k8sClientProvider,
@@ -111,34 +112,34 @@ func NewKubetokenCmd(optFunc ...kubetokenOption) *KubetokenCmd {
 	}
 }
 
-func (kc *KubetokenCmd) Cmd() *cobra.Command {
+func (kc *Cmd) Cmd() *cobra.Command {
 	var namespace string
 	var contextName string
 
 	cmd := &cobra.Command{
 		Use:   "kubetoken",
-		Short: "Print Kubernetes cluster credentials in ExecCredential format.",
-		Long: `Print Kubernetes cluster credentials in ExecCredential format.
+		Short: "Print Kubernetes cluster credentials in ExecCredential format",
+		Long: `Print Kubernetes cluster credentials in ExecCredential format
 You can find more information on 'ExecCredential' and 'client side authentication' at (https://kubernetes.io/docs/reference/config-api/client-authentication.v1/) and  https://kubernetes.io/docs/reference/access-authn-authz/authentication/#client-go-credential-plugins`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			flags := KubetokenFlags{
+			flags := Flags{
 				Namespace: namespace,
 				Context:   contextName,
 			}
 			return kc.Run(ctx, flags)
 		},
 	}
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "okteto context's namespace")
-	cmd.Flags().StringVarP(&contextName, "context", "c", "", "okteto context's name")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "overwrites the current Okteto Namespace")
+	cmd.Flags().StringVarP(&contextName, "context", "c", "", "overwrites the current Okteto Context")
 	return cmd
 }
 
 // Run executes the kubetoken command
-func (kc *KubetokenCmd) Run(ctx context.Context, flags KubetokenFlags) error {
-	oktetoLog.SetOutputFormat("silent")
+func (kc *Cmd) Run(ctx context.Context, flags Flags) error {
+	oktetoLog.SetOutputFormat(oktetoLog.SilentFormat)
 	err := newPreReqValidator(
 		withCtxName(flags.Context),
 		withNamespace(flags.Namespace),
@@ -151,12 +152,15 @@ func (kc *KubetokenCmd) Run(ctx context.Context, flags KubetokenFlags) error {
 		return fmt.Errorf("dynamic kubernetes token cannot be requested: %w", err)
 	}
 
-	err = kc.oktetoCtxCmdRunner.Run(ctx, &contextCMD.ContextOptions{
+	okCtx, err := kc.oktetoCtxCmdRunner.RunStateless(ctx, &contextCMD.Options{
 		Context:   flags.Context,
 		Namespace: flags.Namespace,
 	})
 	if err != nil {
 		return err
+	}
+	if !okCtx.IsOktetoCluster() {
+		return oktetoErrors.ErrContextIsNotOktetoCluster
 	}
 
 	ctxResource := kc.initCtxFunc(flags.Context, flags.Namespace)

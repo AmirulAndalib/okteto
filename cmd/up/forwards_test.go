@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package up
 
 import (
@@ -14,6 +27,7 @@ import (
 )
 
 func TestGlobalForwarderStartsWhenRequired(t *testing.T) {
+	t.Parallel()
 	var tests = []struct {
 		name             string
 		globalFwdSection []forward.GlobalForward
@@ -49,8 +63,8 @@ func TestGlobalForwarderAddsProperlyPortsToForward(t *testing.T) {
 	f := ssh.NewForwardManager(context.Background(), ":8080", "0.0.0.0", "0.0.0.0", nil, "test")
 
 	var tests = []struct {
-		name        string
 		upContext   *upContext
+		name        string
 		expectedErr bool
 	}{
 		{
@@ -114,10 +128,10 @@ func TestGlobalForwarderAddsProperlyPortsToForward(t *testing.T) {
 
 func TestForwards(t *testing.T) {
 	tt := []struct {
-		name                   string
-		OktetoExecuteSSHEnvVar string
 		clientProvider         okteto.K8sClientProvider
 		expected               error
+		name                   string
+		OktetoExecuteSSHEnvVar string
 	}{
 		{
 			name:                   "fakeClientProvider error",
@@ -160,9 +174,9 @@ func TestForwards(t *testing.T) {
 
 func TestSSHForwarss(t *testing.T) {
 	tt := []struct {
-		name           string
 		clientProvider okteto.K8sClientProvider
 		expected       error
+		name           string
 	}{
 		{
 			name: "fakeClientProvider error",

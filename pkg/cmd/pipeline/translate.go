@@ -1,4 +1,4 @@
-// Copyright 2021 The Okteto Authors
+// Copyright 2023 The Okteto Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	giturls "github.com/chainguard-dev/git-urls"
 	"github.com/okteto/okteto/pkg/constants"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/format"
@@ -32,8 +33,8 @@ import (
 	"github.com/okteto/okteto/pkg/k8s/configmaps"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model"
+	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/types"
-	giturls "github.com/whilp/git-urls"
 	apiv1 "k8s.io/api/core/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +54,8 @@ const (
 	actionLockField = "actionLock"
 	actionNameField = "actionName"
 	variablesField  = "variables"
+	devBranchField  = "dev-branch"
+	PhasesField     = "phases"
 
 	actionDefaultName = "cli"
 
@@ -71,6 +74,9 @@ const (
 	// Note that the is the limit after encoding the logs to base64 which is how
 	// the logs are stored in the configmap.
 	maxLogOutput = 800 << (10 * 1)
+
+	// ConfigmapNamePrefix prefix used by the configmaps created by okteto to handle dev environments information
+	ConfigmapNamePrefix = "okteto-git-"
 )
 
 // maxLogOutputRaw is the maximum size we allow to allocate for logs before
@@ -90,6 +96,11 @@ type CfgData struct {
 	Manifest   []byte
 	Icon       string
 	Variables  []string
+}
+
+type phaseJSON struct {
+	Name     string  `json:"name"`
+	Duration float64 `json:"duration"`
 }
 
 // GetConfigmapVariablesEncoded returns Data["variables"] content from Configmap
@@ -136,12 +147,6 @@ func TranslateConfigMapAndDeploy(ctx context.Context, data *CfgData, c kubernete
 	return cmap, nil
 }
 
-// SetOutput sets the output of a config map
-func SetOutput(cfg *apiv1.ConfigMap, output string) *apiv1.ConfigMap {
-	cfg.Data[outputField] = base64.StdEncoding.EncodeToString([]byte(output))
-	return cfg
-}
-
 // UpdateConfigMap updates the configmaps fields
 func UpdateConfigMap(ctx context.Context, cmap *apiv1.ConfigMap, data *CfgData, c kubernetes.Interface) error {
 	cmap, err := configmaps.Get(ctx, cmap.Name, cmap.Namespace, c)
@@ -163,9 +168,10 @@ func UpdateEnvs(ctx context.Context, name, namespace string, envs []string, c ku
 
 	if cmap != nil {
 		envsToSet := make(map[string]string, len(envs))
+		envFormatParts := 2
 		for _, env := range envs {
-			result := strings.Split(env, "=")
-			if len(result) != 2 {
+			result := strings.SplitN(env, "=", envFormatParts)
+			if len(result) != envFormatParts {
 				return fmt.Errorf("invalid env format: '%s'", env)
 			}
 
@@ -185,9 +191,61 @@ func UpdateEnvs(ctx context.Context, name, namespace string, envs []string, c ku
 	return nil
 }
 
+// AddPhaseDuration adds a new phase to the configmap with the duration in seconds
+func AddPhaseDuration(ctx context.Context, name, namespace, phase string, duration time.Duration, c kubernetes.Interface) error {
+	cmap, err := configmaps.Get(ctx, TranslatePipelineName(name), namespace, c)
+	if err != nil {
+		return err
+	}
+	val, ok := cmap.Data[PhasesField]
+	phases := []phaseJSON{}
+	if ok {
+		if err := json.Unmarshal([]byte(val), &phases); err != nil {
+			return err
+		}
+	}
+	// If the phase already exists, update the duration
+	updatedPhase := false
+	for idx, p := range phases {
+		if p.Name == phase {
+			phases[idx].Duration = duration.Seconds()
+			updatedPhase = true
+			break
+		}
+	}
+	// If the phase doesn't exist, add it
+	if !updatedPhase {
+		phases = append(phases, phaseJSON{
+			Name:     phase,
+			Duration: duration.Seconds(),
+		})
+	}
+	encodedPhases, err := json.Marshal(phases)
+	if err != nil {
+		return err
+	}
+	cmap.Data[PhasesField] = string(encodedPhases)
+	return configmaps.Deploy(ctx, cmap, cmap.Namespace, c)
+}
+
 // TranslatePipelineName translate the name into the configmap name
 func TranslatePipelineName(name string) string {
-	return fmt.Sprintf("okteto-git-%s", format.ResourceK8sMetaString(name))
+	return fmt.Sprintf("%s%s", ConfigmapNamePrefix, format.ResourceK8sMetaString(name))
+}
+
+// UpdateLatestUpBranch adds a new phase to the configmap with the duration in seconds
+func UpdateLatestUpBranch(ctx context.Context, name, namespace, branch string, c kubernetes.Interface) error {
+	cmap, err := configmaps.Get(ctx, TranslatePipelineName(name), namespace, c)
+	if err != nil {
+		return err
+	}
+	val := cmap.Data[devBranchField]
+	if val == branch {
+		oktetoLog.Infof("latestUpBranch already set to %s", branch)
+		return nil
+	}
+	cmap.Data[devBranchField] = branch
+	return configmaps.Deploy(ctx, cmap, cmap.Namespace, c)
 }
 
 func translateOutput(output *bytes.Buffer) []byte {
@@ -257,7 +315,7 @@ func translateConfigMapSandBox(data *CfgData) *apiv1.ConfigMap {
 
 	output := oktetoLog.GetOutputBuffer()
 	outputData := translateOutput(output)
-	cmap.Data[outputField] = base64.StdEncoding.EncodeToString([]byte(outputData))
+	cmap.Data[outputField] = base64.StdEncoding.EncodeToString(outputData)
 	return cmap
 }
 
@@ -307,7 +365,7 @@ func updateCmap(cmap *apiv1.ConfigMap, data *CfgData) error {
 
 	output := oktetoLog.GetOutputBuffer()
 	outputData := translateOutput(output)
-	cmap.Data[outputField] = base64.StdEncoding.EncodeToString([]byte(outputData))
+	cmap.Data[outputField] = base64.StdEncoding.EncodeToString(outputData)
 	return nil
 }
 
@@ -318,13 +376,25 @@ func AddDevAnnotations(ctx context.Context, manifest *model.Manifest, c kubernet
 		if dev.Autocreate {
 			continue
 		}
-		app, err := apps.Get(ctx, dev, manifest.Namespace, c)
+		ns := okteto.GetContext().Namespace
+		app, err := apps.Get(ctx, dev, ns, c)
 		if err != nil {
 			oktetoLog.Infof("could not add %s dev annotations due to: %s", devName, err.Error())
 			continue
 		}
+		sanitisedRepo := removeSensitiveDataFromGitURL(repo)
+		repositoryAnnotation := app.ObjectMeta().Annotations[model.OktetoRepositoryAnnotation]
+		devNameAnnotation := app.ObjectMeta().Annotations[model.OktetoDevNameAnnotation]
+
+		if repo != "" && repositoryAnnotation == sanitisedRepo {
+			continue
+		}
+		if devNameAnnotation != "" {
+			continue
+		}
+
 		if repo != "" {
-			app.ObjectMeta().Annotations[model.OktetoRepositoryAnnotation] = removeSensitiveDataFromGitURL(repo)
+			app.ObjectMeta().Annotations[model.OktetoRepositoryAnnotation] = sanitisedRepo
 		}
 		app.ObjectMeta().Annotations[model.OktetoDevNameAnnotation] = devName
 		if err := app.PatchAnnotations(ctx, c); err != nil {
@@ -351,9 +421,10 @@ func removeSensitiveDataFromGitURL(gitURL string) string {
 
 func translateVariables(variables []string) string {
 	var v []types.DeployVariable
+	maxVariableFormatParts := 2
 	for _, item := range variables {
-		splitV := strings.SplitN(item, "=", 2)
-		if len(splitV) != 2 {
+		splitV := strings.SplitN(item, "=", maxVariableFormatParts)
+		if len(splitV) != maxVariableFormatParts {
 			continue
 		}
 		v = append(v, types.DeployVariable{

@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package repository
 
 import (
@@ -11,8 +24,9 @@ import (
 )
 
 type mockLocalExec struct {
-	runCommand func(ctx context.Context, dir string, name string, arg ...string) ([]byte, error)
-	lookPath   func(file string) (string, error)
+	runCommand  func(ctx context.Context, dir string, name string, arg ...string) ([]byte, error)
+	pipeCommand func(ctx context.Context, dir string, cmd1 string, cmd1Args []string, cmd2 string, cmd2Args []string) ([]byte, error)
+	lookPath    func(file string) (string, error)
 }
 
 func (mle *mockLocalExec) RunCommand(ctx context.Context, dir string, name string, arg ...string) ([]byte, error) {
@@ -29,11 +43,19 @@ func (mle *mockLocalExec) LookPath(file string) (string, error) {
 	return "", assert.AnError
 }
 
+func (mle *mockLocalExec) RunPipeCommands(ctx context.Context, dir string, cmd1 string, cmd1Args []string, cmd2 string, cmd2Args []string) ([]byte, error) {
+	if mle.pipeCommand != nil {
+		return mle.pipeCommand(ctx, dir, cmd1, cmd1Args, cmd2, cmd2Args)
+	}
+
+	return nil, assert.AnError
+}
+
 func TestLocalGit_Exists(t *testing.T) {
 	tests := []struct {
-		name     string
-		mockExec func() *mockLocalExec
 		err      error
+		mockExec func() *mockLocalExec
+		name     string
 	}{
 		{
 			name: "git exists",
@@ -70,9 +92,9 @@ func TestLocalGit_Exists(t *testing.T) {
 
 func TestLocalGit_FixDubiousOwnershipConfig(t *testing.T) {
 	tests := []struct {
-		name     string
-		mockExec func() *mockLocalExec
 		err      error
+		mockExec func() *mockLocalExec
+		name     string
 	}{
 		{
 			name: "success",
@@ -110,10 +132,10 @@ func TestLocalGit_FixDubiousOwnershipConfig(t *testing.T) {
 
 func TestLocalGit_Status(t *testing.T) {
 	tests := []struct {
+		expectedErr error
+		mock        func() *mockLocalExec
 		name        string
 		fixAttempts int
-		mock        func() *mockLocalExec
-		expectedErr error
 	}{
 		{
 			name:        "success",
@@ -189,7 +211,7 @@ func TestLocalGit_Status(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			lg := NewLocalGit("git", tt.mock())
-			_, err := lg.Status(context.Background(), "/test/dir", tt.fixAttempts)
+			_, err := lg.Status(context.Background(), "/test/dir", "", tt.fixAttempts)
 
 			assert.ErrorIs(t, err, tt.expectedErr)
 		})
@@ -222,4 +244,135 @@ func Test_LocalExec_RunCommand(t *testing.T) {
 	got, err := localExec.RunCommand(ctx, t.TempDir(), "echo", "okteto")
 	assert.NoError(t, err)
 	assert.Equal(t, "okteto\n", string(got))
+}
+
+func TestLocalGit_GetDirContentSHA(t *testing.T) {
+	tests := []struct {
+		expectedErr error
+		mock        func() *mockLocalExec
+		name        string
+		fixAttempts int
+	}{
+		{
+			name:        "success",
+			fixAttempts: 0,
+			mock: func() *mockLocalExec {
+				return &mockLocalExec{
+					pipeCommand: func(ctx context.Context, dir string, cmd1 string, cmd1Args []string, cmd2 string, cmd2Args []string) ([]byte, error) {
+						return []byte("hash"), nil
+					},
+				}
+			},
+			expectedErr: nil,
+		},
+		{
+			name:        "failure due to too many attempts",
+			fixAttempts: 2,
+			mock: func() *mockLocalExec {
+				return &mockLocalExec{
+					pipeCommand: func(ctx context.Context, dir string, cmd1 string, cmd1Args []string, cmd2 string, cmd2Args []string) ([]byte, error) {
+						return nil, assert.AnError
+					},
+				}
+			},
+			expectedErr: errLocalGitCannotGetCommitTooManyAttempts,
+		},
+		{
+			name:        "cannot recover",
+			fixAttempts: 1,
+			mock: func() *mockLocalExec {
+				return &mockLocalExec{
+					pipeCommand: func(ctx context.Context, dir string, cmd1 string, cmd1Args []string, cmd2 string, cmd2Args []string) ([]byte, error) {
+						return nil, assert.AnError
+					},
+				}
+			},
+			expectedErr: errLocalGitCannotGetStatusCannotRecover,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lg := NewLocalGit("git", tt.mock())
+			_, err := lg.GetDirContentSHA(context.Background(), "", "/test/dir", tt.fixAttempts)
+
+			assert.ErrorIs(t, err, tt.expectedErr)
+		})
+	}
+}
+func TestLocalGit_ListUntrackedFiles(t *testing.T) {
+	tests := []struct {
+		expectedErr   error
+		execMock      func() *mockLocalExec
+		name          string
+		expectedFiles []string
+		fixAttempt    int
+	}{
+		{
+			name:       "success",
+			fixAttempt: 0,
+			execMock: func() *mockLocalExec {
+				return &mockLocalExec{
+					runCommand: func(ctx context.Context, dir string, name string, arg ...string) ([]byte, error) {
+						return []byte("file1.txt\nfile2.txt\nfile3.txt"), nil
+					},
+				}
+			},
+			expectedFiles: []string{"file1.txt", "file2.txt", "file3.txt"},
+			expectedErr:   nil,
+		},
+		{
+			name:       "failure - exit error",
+			fixAttempt: 0,
+			execMock: func() *mockLocalExec {
+				return &mockLocalExec{
+					runCommand: func(ctx context.Context, dir string, name string, arg ...string) ([]byte, error) {
+						return nil, &exec.ExitError{
+							Stderr: []byte("fatal: detected dubious ownership in repository at <path>"),
+						}
+					},
+				}
+			},
+			expectedFiles: []string{},
+			expectedErr:   errLocalGitCannotGetStatusCannotRecover,
+		},
+		{
+			name:       "failure - fix attempt limit reached",
+			fixAttempt: 2,
+			execMock: func() *mockLocalExec {
+				return &mockLocalExec{
+					runCommand: func(ctx context.Context, dir string, name string, arg ...string) ([]byte, error) {
+						return nil, &exec.ExitError{
+							Stderr: []byte("fatal: detected dubious ownership in repository at <path>"),
+						}
+					},
+				}
+			},
+			expectedFiles: []string{},
+			expectedErr:   errLocalGitCannotGetCommitTooManyAttempts,
+		},
+		{
+			name:       "failure - cannot recover",
+			fixAttempt: 1,
+			execMock: func() *mockLocalExec {
+				return &mockLocalExec{
+					runCommand: func(ctx context.Context, dir string, name string, arg ...string) ([]byte, error) {
+						return nil, assert.AnError
+					},
+				}
+			},
+			expectedFiles: []string{},
+			expectedErr:   errLocalGitCannotGetStatusCannotRecover,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lg := NewLocalGit("git", tt.execMock())
+			files, err := lg.ListUntrackedFiles(context.Background(), "/test/dir", "/test", tt.fixAttempt)
+
+			assert.Equal(t, tt.expectedFiles, files)
+			assert.ErrorIs(t, err, tt.expectedErr)
+		})
+	}
 }

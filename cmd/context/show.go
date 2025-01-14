@@ -28,21 +28,27 @@ import (
 // Show current context
 func Show() *cobra.Command {
 	var output string
+	var includeToken bool
 	cmd := &cobra.Command{
 		Use:   "show",
-		Args:  utils.NoArgsAccepted("https://okteto.com/docs/reference/cli/#show"),
-		Short: "Print the current context",
+		Args:  utils.NoArgsAccepted("https://okteto.com/docs/reference/okteto-cli/#show"),
+		Short: "Print the current Okteto Context",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
-			if err := NewContextCommand().Run(ctx, &ContextOptions{raiseNotCtxError: true}); err != nil {
+			if err := NewContextCommand().Run(ctx, &Options{raiseNotCtxError: true, Show: false}); err != nil {
 				return err
 			}
-			ctxStore := okteto.ContextStore()
+			ctxStore := okteto.GetContextStore()
 			current := ctxStore.Contexts[ctxStore.CurrentContext]
 			if err := validateOutput(output); err != nil {
 				return err
 			}
+
+			if !includeToken {
+				current.Token = ""
+			}
+
 			current.Certificate = ""
 			switch output {
 			case "json":
@@ -62,7 +68,7 @@ func Show() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&output, "output", "o", "json", "output format. One of: ['json', 'yaml']")
-
+	cmd.Flags().BoolVar(&includeToken, "include-token", false, "include the token in the output")
 	return cmd
 }
 

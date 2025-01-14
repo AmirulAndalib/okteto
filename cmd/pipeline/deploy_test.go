@@ -26,7 +26,7 @@ import (
 	"github.com/okteto/okteto/internal/test/client"
 	"github.com/okteto/okteto/pkg/cmd/pipeline"
 	"github.com/okteto/okteto/pkg/constants"
-	"github.com/okteto/okteto/pkg/model"
+	"github.com/okteto/okteto/pkg/model/utils"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/types"
 	"github.com/stretchr/testify/assert"
@@ -44,9 +44,9 @@ func Test_getRepositoryURL(t *testing.T) {
 	}
 	var tests = []struct {
 		name        string
-		expectError bool
-		remotes     []remote
 		expect      string
+		remotes     []remote
+		expectError bool
 	}{
 		{
 			name:        "single origin",
@@ -85,12 +85,12 @@ func Test_getRepositoryURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 
-			if _, err := model.GetRepositoryURL(dir); err == nil {
+			if _, err := utils.GetRepositoryURL(dir); err == nil {
 
 				t.Fatal("expected error when there's no github repo")
 			}
 
-			r, err := git.PlainInit(dir, true)
+			r, err := git.PlainInit(dir, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -101,7 +101,7 @@ func Test_getRepositoryURL(t *testing.T) {
 				}
 			}
 
-			url, err := model.GetRepositoryURL(dir)
+			url, err := utils.GetRepositoryURL(dir)
 
 			if tt.expectError {
 				if err == nil {
@@ -125,8 +125,8 @@ func Test_getRepositoryURL(t *testing.T) {
 func TestCheckAllResourcesRunning(t *testing.T) {
 
 	var tests = []struct {
-		name           string
 		resourceStatus map[string]string
+		name           string
 		expectError    bool
 		expectResult   bool
 	}{
@@ -203,9 +203,9 @@ func TestCheckAllResourcesRunning(t *testing.T) {
 
 func TestDeployPipelineSuccesful(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {},
 		},
 	}
@@ -224,7 +224,7 @@ func TestDeployPipelineSuccesful(t *testing.T) {
 		k8sClientProvider: test.NewFakeK8sProvider(),
 	}
 	opts := &DeployOptions{
-		Repository: "test",
+		Repository: "http://stest",
 		Name:       "test",
 	}
 	err := pc.ExecuteDeployPipeline(ctx, opts)
@@ -233,9 +233,9 @@ func TestDeployPipelineSuccesful(t *testing.T) {
 
 func TestDeployPipelineSuccesfulWithWait(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {},
 		},
 	}
@@ -269,7 +269,7 @@ func TestDeployPipelineSuccesfulWithWait(t *testing.T) {
 		k8sClientProvider: test.NewFakeK8sProvider(cmap),
 	}
 	opts := &DeployOptions{
-		Repository: "test",
+		Repository: "https://test",
 		Name:       "test",
 		Namespace:  "test",
 		Wait:       true,
@@ -281,9 +281,9 @@ func TestDeployPipelineSuccesfulWithWait(t *testing.T) {
 
 func TestDeployWithError(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {},
 		},
 	}
@@ -298,7 +298,7 @@ func TestDeployWithError(t *testing.T) {
 		k8sClientProvider: test.NewFakeK8sProvider(),
 	}
 	opts := &DeployOptions{
-		Repository: "test",
+		Repository: "https://test",
 		Name:       "test",
 	}
 	err := pc.ExecuteDeployPipeline(ctx, opts)
@@ -307,9 +307,9 @@ func TestDeployWithError(t *testing.T) {
 
 func TestDeployPipelineSuccesfulWithWaitStreamError(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {},
 		},
 	}
@@ -343,7 +343,7 @@ func TestDeployPipelineSuccesfulWithWaitStreamError(t *testing.T) {
 		k8sClientProvider: test.NewFakeK8sProvider(cmap),
 	}
 	opts := &DeployOptions{
-		Repository: "test",
+		Repository: "https://test",
 		Name:       "test",
 		Namespace:  "test",
 		Wait:       true,
@@ -355,9 +355,9 @@ func TestDeployPipelineSuccesfulWithWaitStreamError(t *testing.T) {
 
 func Test_DeployPipelineWithReuseParamsNotFoundError(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {},
 		},
 	}
@@ -365,7 +365,7 @@ func Test_DeployPipelineWithReuseParamsNotFoundError(t *testing.T) {
 		k8sClientProvider: test.NewFakeK8sProvider(),
 	}
 	opts := &DeployOptions{
-		Repository:  "test",
+		Repository:  "https://test",
 		Name:        "test",
 		ReuseParams: true,
 	}
@@ -375,9 +375,9 @@ func Test_DeployPipelineWithReuseParamsNotFoundError(t *testing.T) {
 
 func Test_DeployPipelineWithReuseParamsSuccess(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {},
 		},
 	}
@@ -407,7 +407,7 @@ func Test_DeployPipelineWithReuseParamsSuccess(t *testing.T) {
 		),
 	}
 	opts := &DeployOptions{
-		Repository:  "test",
+		Repository:  "https://test",
 		Name:        "test",
 		Namespace:   "test",
 		ReuseParams: true,
@@ -424,9 +424,9 @@ func Test_DeployPipelineWithReuseParamsSuccess(t *testing.T) {
 }
 
 func Test_DeployPipelineWithSkipIfExist(t *testing.T) {
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {},
 		},
 	}
@@ -434,9 +434,9 @@ func Test_DeployPipelineWithSkipIfExist(t *testing.T) {
 	fakePipelineClientResponses := &client.FakePipelineResponses{}
 
 	tests := []struct {
-		name string
 		cmd  *Command
 		opts *DeployOptions
+		name string
 	}{
 		{
 			name: "skip because deployed status",
@@ -464,7 +464,7 @@ func Test_DeployPipelineWithSkipIfExist(t *testing.T) {
 				),
 			},
 			opts: &DeployOptions{
-				Repository:   "test",
+				Repository:   "https://test",
 				Name:         "test",
 				Namespace:    "test",
 				SkipIfExists: true,
@@ -496,7 +496,7 @@ func Test_DeployPipelineWithSkipIfExist(t *testing.T) {
 				),
 			},
 			opts: &DeployOptions{
-				Repository:   "test",
+				Repository:   "https://test",
 				Name:         "test",
 				Namespace:    "test",
 				SkipIfExists: true,
@@ -516,9 +516,9 @@ func Test_DeployPipelineWithSkipIfExist(t *testing.T) {
 }
 
 func Test_DeployPipelineWithSkipIfExistAndWait(t *testing.T) {
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {},
 		},
 	}
@@ -526,9 +526,9 @@ func Test_DeployPipelineWithSkipIfExistAndWait(t *testing.T) {
 	fakePipelineClientResponses := &client.FakePipelineResponses{}
 
 	tests := []struct {
-		name string
 		cmd  *Command
 		opts *DeployOptions
+		name string
 	}{
 		{
 			name: "wait and canStreamPrevLogs",
@@ -560,7 +560,7 @@ func Test_DeployPipelineWithSkipIfExistAndWait(t *testing.T) {
 				),
 			},
 			opts: &DeployOptions{
-				Repository:   "test",
+				Repository:   "https://test",
 				Name:         "test",
 				Namespace:    "test",
 				SkipIfExists: true,
@@ -600,7 +600,7 @@ func Test_DeployPipelineWithSkipIfExistAndWait(t *testing.T) {
 				),
 			},
 			opts: &DeployOptions{
-				Repository:   "test",
+				Repository:   "https://test",
 				Name:         "test",
 				Namespace:    "test",
 				SkipIfExists: true,
@@ -639,7 +639,7 @@ func Test_DeployPipelineWithSkipIfExistAndWait(t *testing.T) {
 				),
 			},
 			opts: &DeployOptions{
-				Repository:   "test",
+				Repository:   "https://test",
 				Name:         "test",
 				Namespace:    "test",
 				SkipIfExists: true,
@@ -678,11 +678,11 @@ func (e *fakeEnvSetter) Set(name, value string) error {
 
 func TestSetEnvsFromDependencyNoError(t *testing.T) {
 	var tests = []struct {
-		name            string
-		cmap            *v1.ConfigMap
 		envSetter       fakeEnvSetter
-		expectedErr     bool
+		cmap            *v1.ConfigMap
 		expectedEnvsSet map[string]string
+		name            string
+		expectedErr     bool
 	}{
 		{
 			name:            "nil cmap",
@@ -717,8 +717,25 @@ func TestSetEnvsFromDependencyNoError(t *testing.T) {
 			},
 			expectedErr: false,
 			expectedEnvsSet: map[string]string{
-				"OKTETO_DEPENDENCY_TEST-CONFIGMAP_VARIABLE_TESTSETENVSFROMDEPEN_ONE": "an env value",
-				"OKTETO_DEPENDENCY_TEST-CONFIGMAP_VARIABLE_TESTSETENVSFROMDEPEN_TWO": "another env value",
+				"OKTETO_DEPENDENCY_TEST_CONFIGMAP_VARIABLE_TESTSETENVSFROMDEPEN_ONE": "an env value",
+				"OKTETO_DEPENDENCY_TEST_CONFIGMAP_VARIABLE_TESTSETENVSFROMDEPEN_TWO": "another env value",
+			},
+		},
+		{
+			name:      "okteto git configmap has dependency envs",
+			envSetter: fakeEnvSetter{},
+			cmap: &v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "okteto-git-test-configmap",
+				},
+				Data: map[string]string{
+					constants.OktetoDependencyEnvsKey: "eyJURVNUU0VURU5WU0ZST01ERVBFTl9PTkUiOiJhbiBlbnYgdmFsdWUiLCJURVNUU0VURU5WU0ZST01ERVBFTl9UV08iOiJhbm90aGVyIGVudiB2YWx1ZSJ9",
+				},
+			},
+			expectedErr: false,
+			expectedEnvsSet: map[string]string{
+				"OKTETO_DEPENDENCY_TEST_CONFIGMAP_VARIABLE_TESTSETENVSFROMDEPEN_ONE": "an env value",
+				"OKTETO_DEPENDENCY_TEST_CONFIGMAP_VARIABLE_TESTSETENVSFROMDEPEN_TWO": "another env value",
 			},
 		},
 		{
@@ -750,33 +767,14 @@ func TestSetEnvsFromDependencyNoError(t *testing.T) {
 
 func TestFlagsToOptions(t *testing.T) {
 	tt := []struct {
+		expect *DeployOptions
 		name   string
 		flags  deployFlags
-		expect *DeployOptions
 	}{
 		{
 			name:   "no flags",
 			flags:  deployFlags{},
 			expect: &DeployOptions{},
-		},
-		{
-			name: "filename and file",
-			flags: deployFlags{
-				file:     "file",
-				filename: "filename",
-			},
-			expect: &DeployOptions{
-				File: "file",
-			},
-		},
-		{
-			name: "just filename",
-			flags: deployFlags{
-				filename: "filename",
-			},
-			expect: &DeployOptions{
-				File: "filename",
-			},
 		},
 		{
 			name: "all flags ",
@@ -844,9 +842,9 @@ func Test_applyOverrideToOptions(t *testing.T) {
 
 func Test_cfgToDeployOptions(t *testing.T) {
 	tests := []struct {
-		name     string
 		input    *v1.ConfigMap
 		expected *DeployOptions
+		name     string
 	}{
 		{
 			name:     "empty input",
@@ -914,8 +912,8 @@ func Test_parseVariablesListFromCfgVariablesString(t *testing.T) {
 	tests := []struct {
 		name        string
 		input       string
-		expectedErr bool
 		expected    []string
+		expectedErr bool
 	}{
 		{
 			name:     "empty input",

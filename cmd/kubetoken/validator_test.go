@@ -28,12 +28,12 @@ import (
 
 func TestPreReqValidator(t *testing.T) {
 	type input struct {
-		ctxName              string
-		ns                   string
 		k8sClientProvider    okteto.K8sClientProvider
 		oktetoClientProvider oktetoClientProvider
 		ctx                  context.Context
-		currentStore         *okteto.OktetoContextStore
+		currentStore         *okteto.ContextStore
+		ctxName              string
+		ns                   string
 	}
 
 	ctx := context.Background()
@@ -41,17 +41,17 @@ func TestPreReqValidator(t *testing.T) {
 	cancel()
 
 	tt := []struct {
-		name     string
 		input    input
 		expected error
+		name     string
 	}{
 		{
 			name: "fail on context validation",
 			input: input{
 				ctxName: "",
 				ctx:     ctx,
-				currentStore: &okteto.OktetoContextStore{
-					Contexts:       map[string]*okteto.OktetoContext{},
+				currentStore: &okteto.ContextStore{
+					Contexts:       map[string]*okteto.Context{},
 					CurrentContext: "",
 				},
 			},
@@ -62,8 +62,8 @@ func TestPreReqValidator(t *testing.T) {
 			input: input{
 				ctxName: "https://okteto.com",
 				ns:      "test",
-				currentStore: &okteto.OktetoContextStore{
-					Contexts: map[string]*okteto.OktetoContext{
+				currentStore: &okteto.ContextStore{
+					Contexts: map[string]*okteto.Context{
 						"https://okteto.com": {
 							IsOkteto: true,
 						},
@@ -84,8 +84,8 @@ func TestPreReqValidator(t *testing.T) {
 			input: input{
 				ctxName: "https://okteto.com",
 				ns:      "test",
-				currentStore: &okteto.OktetoContextStore{
-					Contexts: map[string]*okteto.OktetoContext{
+				currentStore: &okteto.ContextStore{
+					Contexts: map[string]*okteto.Context{
 						"https://okteto.com": {
 							IsOkteto: true,
 						},
@@ -106,8 +106,8 @@ func TestPreReqValidator(t *testing.T) {
 				ctxName: "https://okteto.com",
 				ns:      "test",
 				ctx:     ctx,
-				currentStore: &okteto.OktetoContextStore{
-					Contexts: map[string]*okteto.OktetoContext{
+				currentStore: &okteto.ContextStore{
+					Contexts: map[string]*okteto.Context{
 						"https://okteto.com": {
 							IsOkteto: true,
 						},
@@ -135,11 +135,11 @@ func TestPreReqValidator(t *testing.T) {
 				withK8sClientProvider(tc.input.k8sClientProvider),
 				withOktetoClientProvider(tc.input.oktetoClientProvider),
 			)
-			v.getContextStore = func() *okteto.OktetoContextStore {
+			v.getContextStore = func() *okteto.ContextStore {
 				return tc.input.currentStore
 			}
-			v.getCtxResource = func(s1, s2 string) *contextCMD.ContextOptions {
-				return &contextCMD.ContextOptions{
+			v.getCtxResource = func(s1, s2 string) *contextCMD.Options {
+				return &contextCMD.Options{
 					Context:   s1,
 					Namespace: s2,
 				}
@@ -152,17 +152,17 @@ func TestPreReqValidator(t *testing.T) {
 
 func TestCtxValidator(t *testing.T) {
 	type input struct {
-		ctxName           string
 		k8sClientProvider okteto.K8sClientProvider
 		ctx               context.Context
+		ctxName           string
 	}
 
 	ctx := context.Background()
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
 			"https://okteto.com": {
 				IsOkteto: true,
 			},
@@ -171,9 +171,9 @@ func TestCtxValidator(t *testing.T) {
 	}
 
 	tt := []struct {
-		name     string
 		input    input
 		expected error
+		name     string
 	}{
 		{
 			name: "ctx Name is empty",
@@ -229,9 +229,9 @@ func TestCtxValidator(t *testing.T) {
 	}
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
-			v := newCtxValidator(&contextCMD.ContextOptions{
+			v := newCtxValidator(&contextCMD.Options{
 				Context: tc.input.ctxName,
-			}, tc.input.k8sClientProvider, func() *okteto.OktetoContextStore {
+			}, tc.input.k8sClientProvider, func() *okteto.ContextStore {
 				return okteto.CurrentStore
 			})
 			err := v.validate(tc.input.ctx)
@@ -243,11 +243,11 @@ func TestCtxValidator(t *testing.T) {
 func TestOktetoKubetokenSupportValidation(t *testing.T) {
 	type input struct {
 		ctx                      context.Context
-		ctxName                  string
-		ns                       string
 		k8sClient                kubernetes.Interface
 		oktetoClient             types.OktetoInterface
 		errProvidingOktetoClient error
+		ctxName                  string
+		ns                       string
 	}
 
 	ctx := context.Background()
@@ -255,9 +255,9 @@ func TestOktetoKubetokenSupportValidation(t *testing.T) {
 	cancel()
 
 	tt := []struct {
-		name     string
 		input    input
 		expected error
+		name     string
 	}{
 		{
 			name: "context cancelled",
@@ -313,7 +313,7 @@ func TestOktetoKubetokenSupportValidation(t *testing.T) {
 			fakeK8sClientProvider := fakeK8sClientProvider{
 				client: tc.input.k8sClient,
 			}
-			ctxResource := &contextCMD.ContextOptions{
+			ctxResource := &contextCMD.Options{
 				Context:   tc.input.ctxName,
 				Namespace: tc.input.ns,
 			}

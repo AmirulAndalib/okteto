@@ -16,6 +16,7 @@ package namespace
 import (
 	"context"
 	"fmt"
+
 	contextCMD "github.com/okteto/okteto/cmd/context"
 	"github.com/okteto/okteto/cmd/utils"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
@@ -31,11 +32,11 @@ func Sleep(ctx context.Context) *cobra.Command {
 		Short: "Sleeps a namespace",
 		Args:  utils.MaximumNArgsAccepted(1, ""),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.ContextOptions{}); err != nil {
+			if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.Options{}); err != nil {
 				return err
 			}
 
-			nsToSleep := okteto.Context().Namespace
+			nsToSleep := okteto.GetContext().Namespace
 			if len(args) > 0 {
 				nsToSleep = args[0]
 			}
@@ -56,7 +57,7 @@ func Sleep(ctx context.Context) *cobra.Command {
 	return cmd
 }
 
-func (nc *NamespaceCommand) ExecuteSleepNamespace(ctx context.Context, namespace string) error {
+func (nc *Command) ExecuteSleepNamespace(ctx context.Context, namespace string) error {
 	// Spinner to be loaded before sleeping a namespace
 	oktetoLog.Spinner(fmt.Sprintf("Sleeping %s namespace", namespace))
 	oktetoLog.StartSpinner()
@@ -64,7 +65,7 @@ func (nc *NamespaceCommand) ExecuteSleepNamespace(ctx context.Context, namespace
 
 	// trigger namespace to sleep
 	if err := nc.okClient.Namespaces().Sleep(ctx, namespace); err != nil {
-		return fmt.Errorf("%w: %v", errFailedSleepNamespace, err)
+		return fmt.Errorf("%w: %w", errFailedSleepNamespace, err)
 	}
 
 	oktetoLog.Success("Namespace '%s' is sleeping", namespace)

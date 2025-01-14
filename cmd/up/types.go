@@ -25,6 +25,7 @@ import (
 	"github.com/okteto/okteto/pkg/model/forward"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/syncthing"
+	"github.com/okteto/okteto/pkg/types"
 	"github.com/spf13/afero"
 	apiv1 "k8s.io/api/core/v1"
 )
@@ -34,39 +35,66 @@ type registryInterface interface {
 	GetImageTag(image, service, namespace string) string
 }
 
+type builderInterface interface {
+	GetServicesToBuildDuringExecution(ctx context.Context, manifest *model.Manifest, svcToDeploy []string) ([]string, error)
+	Build(ctx context.Context, options *types.BuildOptions) error
+	GetBuildEnvVars() map[string]string
+}
+
+type analyticsTrackerInterface interface {
+	buildTrackerInterface
+	TrackDeploy(analytics.DeployMetadata)
+	TrackUp(*analytics.UpMetricsMetadata)
+}
+
+type buildTrackerInterface interface {
+	TrackImageBuild(ctx context.Context, meta *analytics.ImageBuildMetadata)
+}
+
+type deployTrackerInterface interface {
+	TrackDeploy(ctx context.Context, name, namespace string, success bool)
+}
+
+type buildDeployTrackerInterface interface {
+	buildTrackerInterface
+	deployTrackerInterface
+}
+
 // upContext is the common context of all operations performed during the up command
 type upContext struct {
-	Cancel                context.CancelFunc
-	Registry              registryInterface
-	ShutdownCompleted     chan bool
-	Manifest              *model.Manifest
-	Dev                   *model.Dev
-	Translations          map[string]*apps.Translation
-	isRetry               bool
-	Pod                   *apiv1.Pod
+	Namespace             string
+	StartTime             time.Time
 	Forwarder             forwarder
+	tokenUpdater          tokenUpdater
+	builder               builderInterface
+	analyticsTracker      analyticsTrackerInterface
+	Fs                    afero.Fs
+	K8sClientProvider     okteto.K8sClientProvider
+	Registry              registryInterface
 	Disconnect            chan error
-	GlobalForwarderStatus chan error
+	hybridCommand         *exec.Cmd
+	stateTerm             *term.State
 	CommandResult         chan error
 	Exit                  chan error
 	Sy                    *syncthing.Syncthing
 	cleaned               chan string
 	hardTerminate         chan error
+	Translations          map[string]*apps.Translation
+	Manifest              *model.Manifest
+	analyticsMeta         *analytics.UpMetricsMetadata
+	Dev                   *model.Dev
+	GlobalForwarderStatus chan error
+	ShutdownCompleted     chan bool
+	Options               *Options
+	Pod                   *apiv1.Pod
+	Cancel                context.CancelFunc
+	pidController         pidController
+	inFd                  uintptr
+	isRetry               bool
 	success               bool
 	resetSyncthing        bool
-	inFd                  uintptr
 	isTerm                bool
-	stateTerm             *term.State
-	StartTime             time.Time
-	Options               *UpOptions
-	pidController         pidController
-	tokenUpdater          tokenUpdater
-	K8sClientProvider     okteto.K8sClientProvider
-	Fs                    afero.Fs
-	hybridCommand         *exec.Cmd
 	interruptReceived     bool
-	analyticsTracker      *analytics.AnalyticsTracker
-	analyticsMeta         *analytics.UpMetricsMetadata
 }
 
 // Forwarder is an interface for the port-forwarding features

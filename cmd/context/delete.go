@@ -29,8 +29,8 @@ import (
 func DeleteCMD() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete",
-		Args:  utils.MinimumNArgsAccepted(1, "https://okteto.com/docs/reference/cli/#delete"),
-		Short: "Delete one or more contexts",
+		Args:  utils.MinimumNArgsAccepted(1, "https://okteto.com/docs/reference/okteto-cli/#delete"),
+		Short: "Delete one or more Okteto Contexts",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			for idx, arg := range args {
 				args[idx] = okteto.AddSchema(arg)
@@ -53,7 +53,7 @@ func DeleteCMD() *cobra.Command {
 }
 
 func Delete(okCtxs []string) error {
-	ctxStore := okteto.ContextStore()
+	ctxStore := okteto.GetContextStore()
 	var errs error
 	validOptions := make([]string, 0)
 	for _, okCtx := range okCtxs {
@@ -73,7 +73,7 @@ func Delete(okCtxs []string) error {
 					validOptions = append(validOptions, k)
 				}
 			}
-			errs = multierror.Append(errs, fmt.Errorf("'%s' context doesn't exist.", okCtx))
+			errs = multierror.Append(errs, fmt.Errorf("'%s' context doesn't exist", okCtx))
 		}
 	}
 

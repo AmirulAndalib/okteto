@@ -16,6 +16,7 @@ package forward
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,7 +29,6 @@ import (
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/model/forward"
-
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -38,16 +38,16 @@ import (
 
 // PortForwardManager keeps a list of all the active port forwards
 type PortForwardManager struct {
-	stopped        bool
-	iface          string
+	ctx            context.Context
+	client         kubernetes.Interface
 	ports          map[int]forward.Forward
 	services       map[string]struct{}
 	activeDev      *active
 	activeServices map[string]*active
-	ctx            context.Context
 	restConfig     *rest.Config
-	client         kubernetes.Interface
+	iface          string
 	namespace      string
+	stopped        bool
 }
 
 type active struct {
@@ -99,7 +99,8 @@ func (p *PortForwardManager) Add(f forward.Forward) error {
 	}
 
 	if !model.IsPortAvailable(p.iface, f.Local) {
-		if f.Local <= 1024 {
+		maxSystemPorts := 1024
+		if f.Local <= maxSystemPorts {
 			os := runtime.GOOS
 			switch os {
 			case "darwin":
@@ -142,8 +143,12 @@ func (p *PortForwardManager) Start(devPod, namespace string) error {
 		err := devPF.ForwardPorts()
 		if err != nil {
 			oktetoLog.Infof("k8s forwarding to dev pod finished with errors: %s", err)
-			p.activeDev.closeReady()
-			p.activeDev.err = err
+			if p.activeDev != nil {
+				if !errors.Is(err, portforward.ErrLostConnectionToPod) {
+					p.activeDev.closeReady()
+				}
+				p.activeDev.err = err
+			}
 		}
 	}()
 

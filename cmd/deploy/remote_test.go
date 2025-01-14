@@ -15,289 +15,51 @@ package deploy
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
+	"errors"
 	"testing"
 	"time"
 
-	"github.com/okteto/okteto/pkg/cmd/build"
-	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/build/buildkit"
+	"github.com/okteto/okteto/pkg/deployable"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
-	filesystem "github.com/okteto/okteto/pkg/filesystem/fake"
+	"github.com/okteto/okteto/pkg/externalresource"
+	fakefs "github.com/okteto/okteto/pkg/filesystem/fake"
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/model"
-	"github.com/okteto/okteto/pkg/types"
-	"github.com/spf13/afero"
+	"github.com/okteto/okteto/pkg/remote"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-type fakeBuilder struct {
-	err           error
-	assertOptions func(o *types.BuildOptions)
+type fakeRemoteRunner struct {
+	mock.Mock
 }
 
-func (f fakeBuilder) Build(_ context.Context, opts *types.BuildOptions) error {
-	if f.assertOptions != nil {
-		f.assertOptions(opts)
-	}
-	return f.err
+func (f *fakeRemoteRunner) Run(ctx context.Context, params *remote.Params) error {
+	args := f.Called(ctx, params)
+	return args.Error(0)
 }
 
-func (f fakeBuilder) IsV1() bool { return true }
-
-func TestRemoteTest(t *testing.T) {
-	ctx := context.Background()
-	fakeManifest := &model.Manifest{
-		Deploy: &model.DeployInfo{
-			Image: "test-image",
-		},
-	}
-	wdCtrl := filesystem.NewFakeWorkingDirectoryCtrl(filepath.Clean("/"))
-	fs := afero.NewMemMapFs()
-	tempCreator := filesystem.NewTemporalDirectoryCtrl(fs)
-
-	type config struct {
-		wd            filesystem.FakeWorkingDirectoryCtrlErrors
-		tempFsCreator error
-		options       *Options
-		builderErr    error
-		cert          []byte
-	}
-	var tests = []struct {
-		name     string
-		config   config
-		expected error
-	}{
-		{
-			name: "OS can't access to the working directory",
-			config: config{
-				wd: filesystem.FakeWorkingDirectoryCtrlErrors{
-					Getter: assert.AnError,
-				},
-				options: &Options{},
-				cert:    []byte("this-is-my-cert-there-are-many-like-it-but-this-one-is-mine"),
-			},
-			expected: assert.AnError,
-		},
-		{
-			name: "OS can't create temporal directory",
-			config: config{
-				options:       &Options{},
-				tempFsCreator: assert.AnError,
-			},
-			expected: assert.AnError,
-		},
-		{
-			name: "OS can't change to the previous working directory",
-			config: config{
-				wd: filesystem.FakeWorkingDirectoryCtrlErrors{
-					Setter: assert.AnError,
-				},
-				options: &Options{
-					Manifest: fakeManifest,
-				},
-			},
-			expected: assert.AnError,
-		},
-		{
-			name: "build incorrect",
-			config: config{
-				options: &Options{
-					Manifest: fakeManifest,
-				},
-				builderErr: assert.AnError,
-			},
-			expected: oktetoErrors.UserError{
-				E: assert.AnError,
-			},
-		},
-		{
-			name: "build with command error",
-			config: config{
-				options: &Options{
-					Manifest: fakeManifest,
-				},
-				builderErr: build.OktetoCommandErr{
-					Stage: "test",
-					Err:   assert.AnError,
-				},
-			},
-			expected: oktetoErrors.UserError{
-				E: assert.AnError,
-			},
-		},
-		{
-			name: "everything correct",
-			config: config{
-				options: &Options{
-					Manifest: fakeManifest,
-				},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			wdCtrl.SetErrors(tt.config.wd)
-			tempCreator.SetError(tt.config.tempFsCreator)
-			rdc := remoteDeployCommand{
-				builderV1:            fakeBuilder{err: tt.config.builderErr},
-				fs:                   fs,
-				workingDirectoryCtrl: wdCtrl,
-				temporalCtrl:         tempCreator,
-				clusterMetadata: func(context.Context) (*types.ClusterMetadata, error) {
-					return &types.ClusterMetadata{Certificate: tt.config.cert}, nil
-				},
-				getBuildEnvVars: func() map[string]string { return nil },
-			}
-			err := rdc.deploy(ctx, tt.config.options)
-			if tt.expected != nil {
-				assert.EqualError(t, err, tt.expected.Error())
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
-func TestExtraHosts(t *testing.T) {
-	ctx := context.Background()
-	fakeManifest := &model.Manifest{
-		Deploy: &model.DeployInfo{
-			Image: "test-image",
-		},
-	}
-	wdCtrl := filesystem.NewFakeWorkingDirectoryCtrl(filepath.Clean("/"))
-	fs := afero.NewMemMapFs()
-	tempCreator := filesystem.NewTemporalDirectoryCtrl(fs)
-
-	rdc := remoteDeployCommand{
-		builderV1: fakeBuilder{
-			assertOptions: func(o *types.BuildOptions) {
-				require.Len(t, o.ExtraHosts, 2)
-				for _, eh := range o.ExtraHosts {
-					require.Equal(t, eh.IP, "1.2.3.4")
-				}
-			},
-		},
-		fs:                   fs,
-		workingDirectoryCtrl: wdCtrl,
-		temporalCtrl:         tempCreator,
-		clusterMetadata: func(context.Context) (*types.ClusterMetadata, error) {
-			return &types.ClusterMetadata{
-				ServerName: "1.2.3.4:443",
-			}, nil
-		},
-		getBuildEnvVars: func() map[string]string { return nil },
-	}
-
-	err := rdc.deploy(ctx, &Options{
-		Manifest: fakeManifest,
-	})
-	require.NoError(t, err)
-}
-
-func TestRemoteDeployWithSshAgent(t *testing.T) {
-	fs := afero.NewMemMapFs()
-	socket, err := os.CreateTemp("", "okteto-test-ssh-*")
-	require.NoError(t, err)
-	defer socket.Close()
-
-	knowHostFile, err := os.CreateTemp("", "okteto-test-know_hosts-*")
-	require.NoError(t, err)
-	defer socket.Close()
-
-	assertFn := func(o *types.BuildOptions) {
-		assert.Contains(t, o.SshSessions, types.BuildSshSession{Id: "remote", Target: socket.Name()})
-		assert.Contains(t, o.Secrets, fmt.Sprintf("id=known_hosts,src=%s", knowHostFile.Name()))
-	}
-
-	envvarName := fmt.Sprintf("TEST_SOCKET_%s", os.Getenv("RANDOM"))
-
-	os.Setenv(envvarName, socket.Name())
-	defer func() {
-		t.Logf("cleaning up %s envvar", envvarName)
-		os.Unsetenv(envvarName)
-	}()
-	rdc := remoteDeployCommand{
-		sshAuthSockEnvvar:    envvarName,
-		getBuildEnvVars:      func() map[string]string { return nil },
-		knownHostsPath:       knowHostFile.Name(),
-		builderV1:            fakeBuilder{assertOptions: assertFn},
-		fs:                   fs,
-		workingDirectoryCtrl: filesystem.NewFakeWorkingDirectoryCtrl(filepath.Clean("/")),
-		temporalCtrl:         filesystem.NewTemporalDirectoryCtrl(fs),
-		clusterMetadata: func(context.Context) (*types.ClusterMetadata, error) {
-			return &types.ClusterMetadata{}, nil
-		},
-	}
-
-	err = rdc.deploy(context.Background(), &Options{
-		Manifest: &model.Manifest{
-			Deploy: &model.DeployInfo{
-				Image: "test-image",
-			},
-		},
-	})
-	assert.NoError(t, err)
-}
-
-func TestRemoteDeployWithBadSshAgent(t *testing.T) {
-	fs := afero.NewMemMapFs()
-
-	assertFn := func(o *types.BuildOptions) {
-		assert.NotContains(t, o.SshSessions, types.BuildSshSession{Id: "remote", Target: "bad-socket"})
-		assert.NotContains(t, o.Secrets, fmt.Sprintf("id=known_hosts,src=%s", "inexistent-file"))
-	}
-
-	envvarName := fmt.Sprintf("TEST_SOCKET_%s", os.Getenv("RANDOM"))
-
-	os.Setenv(envvarName, "bad-socket")
-	defer func() {
-		t.Logf("cleaning up %s envvar", envvarName)
-		os.Unsetenv(envvarName)
-	}()
-	rdc := remoteDeployCommand{
-		sshAuthSockEnvvar:    envvarName,
-		knownHostsPath:       "inexistent-file",
-		builderV1:            fakeBuilder{assertOptions: assertFn},
-		fs:                   fs,
-		workingDirectoryCtrl: filesystem.NewFakeWorkingDirectoryCtrl(filepath.Clean("/")),
-		temporalCtrl:         filesystem.NewTemporalDirectoryCtrl(fs),
-		clusterMetadata: func(context.Context) (*types.ClusterMetadata, error) {
-			return &types.ClusterMetadata{}, nil
-		},
-		getBuildEnvVars: func() map[string]string { return nil },
-	}
-
-	err := rdc.deploy(context.Background(), &Options{
-		Manifest: &model.Manifest{
-			Deploy: &model.DeployInfo{
-				Image: "test-image",
-			},
-		},
-	})
-	assert.NoError(t, err)
-}
-
-func TestGetDeployFlags(t *testing.T) {
+func TestGetCommandFlags(t *testing.T) {
 	type config struct {
 		opts *Options
 	}
 	var tests = []struct {
-		name     string
-		config   config
-		expected []string
+		name      string
+		config    config
+		expected  []string
+		expectErr bool
 	}{
 		{
 			name: "no extra options",
 			config: config{
 				opts: &Options{
 					Timeout: 2 * time.Minute,
+					Name:    "test",
 				},
 			},
-			expected: []string{"--timeout 2m0s"},
+			expected: []string{"--name \"test\""},
 		},
 		{
 			name: "name set",
@@ -307,7 +69,7 @@ func TestGetDeployFlags(t *testing.T) {
 					Timeout: 5 * time.Minute,
 				},
 			},
-			expected: []string{"--name \"test\"", "--timeout 5m0s"},
+			expected: []string{"--name \"test\""},
 		},
 		{
 			name: "name multiple words",
@@ -317,32 +79,36 @@ func TestGetDeployFlags(t *testing.T) {
 					Timeout: 5 * time.Minute,
 				},
 			},
-			expected: []string{"--name \"this is a test\"", "--timeout 5m0s"},
+			expected: []string{"--name \"this is a test\""},
 		},
 		{
-			name: "namespace set",
+			name: "namespace is not set",
 			config: config{
 				opts: &Options{
+					Name:      "test",
 					Namespace: "test",
 					Timeout:   5 * time.Minute,
 				},
 			},
-			expected: []string{"--namespace test", "--timeout 5m0s"},
+			expected: []string{"--name \"test\""},
 		},
 		{
-			name: "manifest path set",
+			name: "manifest path is not set",
 			config: config{
 				opts: &Options{
+					Name:             "test",
 					ManifestPathFlag: "/hello/this/is/a/test",
+					ManifestPath:     "/hello/this/is/a/test",
 					Timeout:          5 * time.Minute,
 				},
 			},
-			expected: []string{"--file /hello/this/is/a/test", "--timeout 5m0s"},
+			expected: []string{"--name \"test\""},
 		},
 		{
 			name: "variables set",
 			config: config{
 				opts: &Options{
+					Name: "test",
 					Variables: []string{
 						"a=b",
 						"c=d",
@@ -350,180 +116,306 @@ func TestGetDeployFlags(t *testing.T) {
 					Timeout: 5 * time.Minute,
 				},
 			},
-			expected: []string{"--var a=b --var c=d", "--timeout 5m0s"},
+			expected: []string{"--name \"test\"", "--var a=\"b\" --var c=\"d\""},
 		},
 		{
-			name: "wait set",
+			name: "wait is not set",
 			config: config{
 				opts: &Options{
+					Name:    "test",
 					Wait:    true,
 					Timeout: 5 * time.Minute,
 				},
 			},
-			expected: []string{"--wait", "--timeout 5m0s"},
+			expected: []string{"--name \"test\""},
+		},
+		{
+			name: "multiword var value",
+			config: config{
+				opts: &Options{
+					Name:      "test",
+					Variables: []string{"test=multi word value"},
+				},
+			},
+			expected: []string{"--name \"test\"", "--var test=\"multi word value\""},
+		},
+		{
+			name: "wrong multiword var value",
+			config: config{
+				opts: &Options{
+					Name:      "test",
+					Variables: []string{"test -> multi word value"},
+				},
+			},
+			expected:  nil,
+			expectErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			flags := getDeployFlags(tt.config.opts)
+			flags, err := GetCommandFlags(tt.config.opts.Name, tt.config.opts.Variables)
+			if tt.expectErr {
+				require.Error(t, err)
+			}
 			assert.Equal(t, tt.expected, flags)
 		})
 	}
 }
 
-func TestCreateDockerfile(t *testing.T) {
-	wdCtrl := filesystem.NewFakeWorkingDirectoryCtrl(filepath.Clean("/"))
-	fs := afero.NewMemMapFs()
-	fakeManifest := &model.Manifest{
-		Deploy: &model.DeployInfo{
-			Image: "test-image",
-		},
-	}
-	type config struct {
-		wd   filesystem.FakeWorkingDirectoryCtrlErrors
-		opts *Options
-	}
-	type expected struct {
-		dockerfileName    string
-		dockerfileContent string
-		buildEnvVars      map[string]string
-		err               error
-	}
-	var tests = []struct {
-		name     string
-		config   config
-		expected expected
-	}{
-		{
-			name: "OS can't access working directory",
-			config: config{
-				wd: filesystem.FakeWorkingDirectoryCtrlErrors{
-					Getter: assert.AnError,
-				},
-			},
-			expected: expected{
-				dockerfileName: "",
-				err:            assert.AnError,
-			},
-		},
-		{
-			name: "with dockerignore",
-			config: config{
-				opts: &Options{
-					Manifest: fakeManifest,
-				},
-			},
-			expected: expected{
-				dockerfileName: filepath.Clean("/test/Dockerfile.deploy"),
-				dockerfileContent: `
-FROM okteto/okteto:latest as okteto-cli
-
-FROM test-image as deploy
-
-ENV PATH="${PATH}:/okteto/bin"
-COPY --from=okteto-cli /usr/local/bin/* /okteto/bin/
-
-
-ENV OKTETO_DEPLOY_REMOTE true
-ARG OKTETO_NAMESPACE
-ARG OKTETO_CONTEXT
-ARG OKTETO_TOKEN
-ARG OKTETO_ACTION_NAME
-ARG OKTETO_TLS_CERT_BASE64
-ARG INTERNAL_SERVER_NAME
-RUN mkdir -p /etc/ssl/certs/
-RUN echo "$OKTETO_TLS_CERT_BASE64" | base64 -d > /etc/ssl/certs/okteto.crt
-
-COPY . /okteto/src
-WORKDIR /okteto/src
-
-
-ENV OKTETO_BUIL_SVC2_IMAGE TWO_VALUE
-
-ENV OKTETO_BUIL_SVC_IMAGE ONE_VALUE
-
-
-ARG OKTETO_GIT_COMMIT
-ARG OKTETO_INVALIDATE_CACHE
-
-RUN okteto registrytoken install --force --log-output=json
-
-RUN --mount=type=secret,id=known_hosts --mount=id=remote,type=ssh \
-  mkdir -p $HOME/.ssh && echo "UserKnownHostsFile=/run/secrets/known_hosts" >> $HOME/.ssh/config && \
-  okteto deploy --log-output=json --server-name="$INTERNAL_SERVER_NAME" --timeout 0s
-`,
-				buildEnvVars: map[string]string{"OKTETO_BUIL_SVC_IMAGE": "ONE_VALUE", "OKTETO_BUIL_SVC2_IMAGE": "TWO_VALUE"},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			wdCtrl.SetErrors(tt.config.wd)
-			rdc := remoteDeployCommand{
-				getBuildEnvVars: func() map[string]string {
-					return tt.expected.buildEnvVars
-				},
-				fs:                   fs,
-				workingDirectoryCtrl: wdCtrl,
-			}
-			dockerfileName, err := rdc.createDockerfile("/test", tt.config.opts)
-			assert.ErrorIs(t, err, tt.expected.err)
-			assert.Equal(t, tt.expected.dockerfileName, dockerfileName)
-
-			if dockerfileName != "" {
-				bFile, err := afero.ReadFile(fs, dockerfileName)
-				assert.NoError(t, err)
-				assert.EqualValues(t, tt.expected.dockerfileContent, string(bFile))
-			}
-
-			if tt.expected.err == nil {
-				_, err = rdc.fs.Stat(filepath.Join("/test", dockerfileTemporalName))
-				assert.NoError(t, err)
-			}
-
-		})
-	}
+func Test_newRemoteDeployer(t *testing.T) {
+	getBuildEnvVars := func() map[string]string { return nil }
+	getDependencyEnvVars := func(_ environGetter) map[string]string { return nil }
+	getExecutionEvVars := func(_ context.Context) map[string]string { return make(map[string]string) }
+	got := newRemoteDeployer(getBuildEnvVars, io.NewIOController(), getDependencyEnvVars, getExecutionEvVars)
+	require.IsType(t, &remoteDeployer{}, got)
+	require.NotNil(t, got.getBuildEnvVars)
 }
 
-func Test_getOktetoCLIVersion(t *testing.T) {
-	var tests = []struct {
-		name                                 string
-		versionString, expected, cliImageEnv string
+func TestDeployRemoteWithCtx(t *testing.T) {
+	workdirCtrl := fakefs.NewFakeWorkingDirectoryCtrl("/path/to/manifest")
+	manifest := &model.Manifest{
+		Deploy: &model.DeployInfo{
+			Context: "../..",
+			Image:   "test-image",
+			Divert: &model.DivertDeploy{
+				Namespace: "test-divert",
+				Driver:    "divert-driver",
+			},
+			Commands: []model.DeployCommand{
+				{
+					Name:    "command 1",
+					Command: "test-command",
+				},
+			},
+		},
+		External: map[string]*externalresource.ExternalResource{
+			"test": {
+				Icon: "database",
+			},
+		},
+	}
+
+	expectedParams := &remote.Params{
+		BaseImage:           manifest.Deploy.Image,
+		ManifestPathFlag:    "/path/to/manifest/okteto.yml",
+		TemplateName:        templateName,
+		CommandFlags:        []string{"--name \"test\""},
+		BuildEnvVars:        map[string]string{"BUILD_VAR_1": "value"},
+		DependenciesEnvVars: map[string]string{"DEP_VAR_1": "value"},
+		ExecutionEnvVars:    map[string]string{"PLAT_VAR_1": "value"},
+		DockerfileName:      dockerfileTemporalName,
+		Deployable: deployable.Entity{
+			Divert:   manifest.Deploy.Divert,
+			Commands: manifest.Deploy.Commands,
+			External: manifest.External,
+		},
+		OktetoCommandSpecificEnvVars: map[string]string{
+			"OKTETO_IS_PREVIEW_ENVIRONMENT": "",
+		},
+		Manifest:                    manifest,
+		Command:                     remote.DeployCommand,
+		UseOktetoDeployIgnoreFile:   true,
+		ContextAbsolutePathOverride: "/path",
+	}
+	runner := &fakeRemoteRunner{}
+	runner.On("Run", mock.Anything, expectedParams).Return(nil)
+	rd := &remoteDeployer{
+		runner:      runner,
+		workdirCtrl: workdirCtrl,
+		getBuildEnvVars: func() map[string]string {
+			return map[string]string{"BUILD_VAR_1": "value"}
+		},
+		getDependencyEnvVars: func(environGetter) map[string]string {
+			return map[string]string{"DEP_VAR_1": "value"}
+		},
+		getExecutionEnvVars: func(ctx context.Context) map[string]string {
+			return map[string]string{"PLAT_VAR_1": "value"}
+		},
+	}
+	opts := &Options{
+		Name:             "test",
+		Manifest:         manifest,
+		ManifestPathFlag: "/path/to/manifest/okteto.yml",
+	}
+	err := rd.Deploy(context.Background(), opts)
+	require.NoError(t, err)
+	runner.AssertExpectations(t)
+}
+func TestDeployRemote(t *testing.T) {
+	workdirCtrl := fakefs.NewFakeWorkingDirectoryCtrl("/path/to/manifest")
+	manifest := &model.Manifest{
+		Deploy: &model.DeployInfo{
+			Image: "test-image",
+			Divert: &model.DivertDeploy{
+				Namespace: "test-divert",
+				Driver:    "divert-driver",
+			},
+			Commands: []model.DeployCommand{
+				{
+					Name:    "command 1",
+					Command: "test-command",
+				},
+			},
+		},
+		External: map[string]*externalresource.ExternalResource{
+			"test": {
+				Icon: "database",
+			},
+		},
+	}
+
+	expectedParams := &remote.Params{
+		BaseImage:           manifest.Deploy.Image,
+		ManifestPathFlag:    "/path/to/manifest/okteto.yml",
+		TemplateName:        templateName,
+		CommandFlags:        []string{"--name \"test\""},
+		BuildEnvVars:        map[string]string{"BUILD_VAR_1": "value"},
+		DependenciesEnvVars: map[string]string{"DEP_VAR_1": "value"},
+		ExecutionEnvVars:    map[string]string{"PLAT_VAR_1": "value"},
+		DockerfileName:      dockerfileTemporalName,
+		Deployable: deployable.Entity{
+			Divert:   manifest.Deploy.Divert,
+			Commands: manifest.Deploy.Commands,
+			External: manifest.External,
+		},
+		OktetoCommandSpecificEnvVars: map[string]string{
+			"OKTETO_IS_PREVIEW_ENVIRONMENT": "",
+		},
+		Manifest:                    manifest,
+		Command:                     remote.DeployCommand,
+		UseOktetoDeployIgnoreFile:   true,
+		ContextAbsolutePathOverride: "/path/to/manifest",
+	}
+	runner := &fakeRemoteRunner{}
+	runner.On("Run", mock.Anything, expectedParams).Return(nil)
+	rd := &remoteDeployer{
+		runner:      runner,
+		workdirCtrl: workdirCtrl,
+		getBuildEnvVars: func() map[string]string {
+			return map[string]string{"BUILD_VAR_1": "value"}
+		},
+		getDependencyEnvVars: func(environGetter) map[string]string {
+			return map[string]string{"DEP_VAR_1": "value"}
+		},
+		getExecutionEnvVars: func(ctx context.Context) map[string]string {
+			return map[string]string{"PLAT_VAR_1": "value"}
+		},
+	}
+	opts := &Options{
+		Name:             "test",
+		Manifest:         manifest,
+		ManifestPathFlag: "/path/to/manifest/okteto.yml",
+	}
+	err := rd.Deploy(context.Background(), opts)
+	require.NoError(t, err)
+	runner.AssertExpectations(t)
+}
+
+func TestDeployRemoteWithError(t *testing.T) {
+	workdirCtrl := fakefs.NewFakeWorkingDirectoryCtrl("/path/to/manifest")
+	manifest := &model.Manifest{
+		Deploy: &model.DeployInfo{
+			Image: "test-image",
+			Divert: &model.DivertDeploy{
+				Namespace: "test-divert",
+				Driver:    "divert-driver",
+			},
+			Commands: []model.DeployCommand{
+				{
+					Name:    "command 1",
+					Command: "test-command",
+				},
+			},
+		},
+		External: map[string]*externalresource.ExternalResource{
+			"test": {
+				Icon: "database",
+			},
+		},
+	}
+
+	expectedParams := &remote.Params{
+		BaseImage:           manifest.Deploy.Image,
+		ManifestPathFlag:    "/path/to/manifest/okteto.yml",
+		TemplateName:        templateName,
+		CommandFlags:        []string{"--name \"test\""},
+		BuildEnvVars:        map[string]string{"BUILD_VAR_1": "value"},
+		DependenciesEnvVars: map[string]string{"DEP_VAR_1": "value"},
+		ExecutionEnvVars:    map[string]string{"PLAT_VAR_1": "value"},
+		DockerfileName:      dockerfileTemporalName,
+		Deployable: deployable.Entity{
+			Divert:   manifest.Deploy.Divert,
+			Commands: manifest.Deploy.Commands,
+			External: manifest.External,
+		},
+		OktetoCommandSpecificEnvVars: map[string]string{
+			"OKTETO_IS_PREVIEW_ENVIRONMENT": "",
+		},
+		Manifest:                    manifest,
+		Command:                     remote.DeployCommand,
+		UseOktetoDeployIgnoreFile:   true,
+		ContextAbsolutePathOverride: "/path/to/manifest",
+	}
+
+	tests := []struct {
+		err           error
+		expectedCheck func(err error) bool
+		name          string
 	}{
 		{
-			name:          "no version string and no env return latest",
-			versionString: "",
-			expected:      "okteto/okteto:latest",
+			name: "WithOktetoCommandErr",
+			err: buildkit.CommandErr{
+				Stage: "test",
+				Err:   assert.AnError,
+			},
+			expectedCheck: func(err error) bool {
+				return errors.Is(err, assert.AnError)
+			},
 		},
 		{
-			name:          "no version string return env value",
-			versionString: "",
-			cliImageEnv:   "okteto/remote:test",
-			expected:      "okteto/remote:test",
+			name: "WithUserError",
+			err: oktetoErrors.UserError{
+				E: assert.AnError,
+			},
+			expectedCheck: func(err error) bool {
+				return errors.As(err, &oktetoErrors.UserError{})
+			},
 		},
 		{
-			name:          "found version string",
-			versionString: "2.2.2",
-			expected:      "okteto/okteto:2.2.2",
-		},
-		{
-			name:          "found incorrect version string return latest ",
-			versionString: "2.a.2",
-			expected:      "okteto/okteto:latest",
+			name: "WithOtherError",
+			err:  assert.AnError,
+			expectedCheck: func(err error) bool {
+				return errors.Is(err, assert.AnError)
+			},
 		},
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.cliImageEnv != "" {
-				t.Setenv(constants.OktetoDeployRemoteImage, tt.cliImageEnv)
+			runner := &fakeRemoteRunner{}
+			runner.On("Run", mock.Anything, expectedParams).Return(tt.err)
+			rd := &remoteDeployer{
+				workdirCtrl: workdirCtrl,
+				runner:      runner,
+				getBuildEnvVars: func() map[string]string {
+					return map[string]string{"BUILD_VAR_1": "value"}
+				},
+				getDependencyEnvVars: func(environGetter) map[string]string {
+					return map[string]string{"DEP_VAR_1": "value"}
+				},
+				getExecutionEnvVars: func(_ context.Context) map[string]string {
+					return map[string]string{"PLAT_VAR_1": "value"}
+				},
 			}
-
-			version := getOktetoCLIVersion(tt.versionString)
-			require.Equal(t, version, tt.expected)
+			opts := &Options{
+				Name:             "test",
+				Manifest:         manifest,
+				ManifestPathFlag: "/path/to/manifest/okteto.yml",
+			}
+			err := rd.Deploy(context.Background(), opts)
+			require.True(t, tt.expectedCheck(err))
+			runner.AssertExpectations(t)
 		})
 	}
 }

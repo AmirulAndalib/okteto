@@ -25,20 +25,23 @@ import (
 	"github.com/okteto/okteto/pkg/k8s/deployments"
 	"github.com/okteto/okteto/pkg/k8s/statefulsets"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	ioCtrl "github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/okteto"
 )
 
-type DeployWaiter struct {
-	K8sClientProvider okteto.K8sClientProvider
+type Waiter struct {
+	K8sClientProvider okteto.K8sClientProviderWithLogger
+	K8sLogger         *ioCtrl.K8sLogger
 }
 
-func NewDeployWaiter(k8sClientProvider okteto.K8sClientProvider) DeployWaiter {
-	return DeployWaiter{
+func NewDeployWaiter(k8sClientProvider okteto.K8sClientProviderWithLogger, k8slogger *ioCtrl.K8sLogger) Waiter {
+	return Waiter{
 		K8sClientProvider: k8sClientProvider,
+		K8sLogger:         k8slogger,
 	}
 }
 
-func (dw *DeployWaiter) wait(ctx context.Context, opts *Options) error {
+func (dw *Waiter) wait(ctx context.Context, opts *Options) error {
 	oktetoLog.Spinner(fmt.Sprintf("Waiting for %s to be deployed...", opts.Name))
 	oktetoLog.StartSpinner()
 	defer oktetoLog.StopSpinner()
@@ -63,10 +66,10 @@ func (dw *DeployWaiter) wait(ctx context.Context, opts *Options) error {
 	return nil
 }
 
-func (dw *DeployWaiter) waitForResourcesToBeRunning(ctx context.Context, opts *Options) error {
+func (dw *Waiter) waitForResourcesToBeRunning(ctx context.Context, opts *Options) error {
 	ticker := time.NewTicker(5 * time.Second)
 	to := time.NewTicker(opts.Timeout)
-	c, _, err := dw.K8sClientProvider.Provide(okteto.Context().Cfg)
+	c, _, err := dw.K8sClientProvider.ProvideWithLogger(okteto.GetContext().Cfg, dw.K8sLogger)
 	if err != nil {
 		return err
 	}
@@ -74,29 +77,30 @@ func (dw *DeployWaiter) waitForResourcesToBeRunning(ctx context.Context, opts *O
 	for {
 		select {
 		case <-to.C:
-			return fmt.Errorf("'%s' deploy didn't finish after %s", opts.Manifest.Name, opts.Timeout.String())
+			return fmt.Errorf("'%s' resources where not healthy after %s", opts.Manifest.Name, opts.Timeout.String())
 		case <-ticker.C:
-			dList, err := pipeline.ListDeployments(ctx, opts.Manifest.Name, opts.Manifest.Namespace, c)
+			ns := okteto.GetContext().Namespace
+			dList, err := pipeline.ListDeployments(ctx, opts.Manifest.Name, ns, c)
 			if err != nil {
 				return err
 			}
 			areAllRunning := true
 			for i := range dList {
 				d := &dList[i]
-				if !deployments.IsRunning(ctx, opts.Manifest.Namespace, d.Name, c) {
+				if !deployments.IsRunning(ctx, ns, d.Name, c) {
 					areAllRunning = false
 				}
 			}
 			if !areAllRunning {
 				continue
 			}
-			sfsList, err := pipeline.ListStatefulsets(ctx, opts.Manifest.Name, opts.Manifest.Namespace, c)
+			sfsList, err := pipeline.ListStatefulsets(ctx, opts.Manifest.Name, ns, c)
 			if err != nil {
 				return err
 			}
 			for i := range sfsList {
 				ss := &sfsList[i]
-				if !statefulsets.IsRunning(ctx, opts.Manifest.Namespace, ss.Name, c) {
+				if !statefulsets.IsRunning(ctx, ns, ss.Name, c) {
 					areAllRunning = false
 				}
 			}

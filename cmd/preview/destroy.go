@@ -15,6 +15,7 @@ package preview
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -27,7 +28,6 @@ import (
 	"github.com/okteto/okteto/pkg/constants"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
-	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/types"
 	"github.com/spf13/cobra"
@@ -49,8 +49,10 @@ func newDestroyPreviewCommand(okClient types.OktetoInterface, k8sClient kubernet
 }
 
 type DestroyOptions struct {
-	name string
-	wait bool
+	name       string
+	k8sContext string
+	wait       bool
+	timeout    time.Duration
 }
 
 // Destroy destroy a preview
@@ -58,20 +60,16 @@ func Destroy(ctx context.Context) *cobra.Command {
 	opts := &DestroyOptions{}
 	cmd := &cobra.Command{
 		Use:   "destroy <name>",
-		Short: "Destroy a preview environment",
+		Short: "Destroy a Preview Environment",
 		Args:  utils.ExactArgsAccepted(1, ""),
+		Example: `To destroy a Preview Environment without the Okteto CLI wait for its completion, use the '--wait=false' flag:
+okteto preview destroy --wait=false`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.name = getExpandedName(args[0])
 
-			ctxResource := &model.ContextResource{}
-			if err := ctxResource.UpdateNamespace(opts.name); err != nil {
+			if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.Options{Show: true, Context: opts.k8sContext}); err != nil {
 				return err
 			}
-
-			if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.ContextOptions{}); err != nil {
-				return err
-			}
-			oktetoLog.Information("Using %s @ %s as context", opts.name, okteto.RemoveSchema(okteto.Context().Name))
 
 			if !okteto.IsOkteto() {
 				return oktetoErrors.ErrContextIsNotOktetoCluster
@@ -92,7 +90,9 @@ func Destroy(ctx context.Context) *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().BoolVarP(&opts.wait, "wait", "w", true, "wait until the preview environment gets destroyed (defaults to true)")
+	cmd.Flags().StringVarP(&opts.k8sContext, "context", "c", "", "overwrite the current Okteto Context")
+	cmd.Flags().BoolVarP(&opts.wait, "wait", "w", true, "wait until the Preview Environment destruction finishes")
+	cmd.Flags().DurationVarP(&opts.timeout, "timeout", "t", fiveMinutes, "the duration to wait for the Preview Environment to be destroyed. Any value should contain a corresponding time unit e.g. 1s, 2m, 3h")
 	return cmd
 }
 
@@ -102,7 +102,11 @@ func (c destroyPreviewCommand) executeDestroyPreview(ctx context.Context, opts *
 	defer oktetoLog.StopSpinner()
 
 	if err := c.okClient.Previews().Destroy(ctx, opts.name); err != nil {
-		return fmt.Errorf("failed to destroy preview environment: %s", err)
+		if oktetoErrors.IsNotFound(err) {
+			oktetoLog.Information("Preview environment '%s' not found.", opts.name)
+			return nil
+		}
+		return fmt.Errorf("failed to destroy preview environment: %w", err)
 	}
 
 	if !opts.wait {
@@ -110,7 +114,7 @@ func (c destroyPreviewCommand) executeDestroyPreview(ctx context.Context, opts *
 		return nil
 	}
 
-	if err := c.watchDestroy(ctx, opts.name); err != nil {
+	if err := c.watchDestroy(ctx, opts.name, opts.timeout); err != nil {
 		return err
 	}
 
@@ -118,7 +122,7 @@ func (c destroyPreviewCommand) executeDestroyPreview(ctx context.Context, opts *
 	return nil
 }
 
-func (c destroyPreviewCommand) watchDestroy(ctx context.Context, preview string) error {
+func (c destroyPreviewCommand) watchDestroy(ctx context.Context, preview string, timeout time.Duration) error {
 	waitCtx, ctxCancel := context.WithCancel(ctx)
 	defer ctxCancel()
 
@@ -134,14 +138,16 @@ func (c destroyPreviewCommand) watchDestroy(ctx context.Context, preview string)
 	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
 		defer wg.Done()
-		exit <- c.waitForPreviewDestroyed(waitCtx, preview)
+		exit <- c.waitForPreviewDestroyed(waitCtx, preview, timeout)
 	}(&wg)
 
 	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
 		defer wg.Done()
 		err := c.okClient.Stream().DestroyAllLogs(waitCtx, preview)
-		if err != nil {
+		// Check if error is not canceled because in the case of a timeout waiting the operation to complete,
+		// we cancel the context to stop streaming logs, but we should not display the warning
+		if err != nil && !errors.Is(err, context.Canceled) {
 			oktetoLog.Warning("final log output will appear once this action is complete")
 			oktetoLog.Infof("destroy preview logs cannot be streamed due to connectivity issues: %v", err)
 		}
@@ -153,21 +159,21 @@ func (c destroyPreviewCommand) watchDestroy(ctx context.Context, preview string)
 		oktetoLog.Infof("CTRL+C received, exit")
 		return oktetoErrors.ErrIntSig
 	case err := <-exit:
+		ctxCancel()
 		// wait until streaming logs have finished
 		wg.Wait()
 		return err
 	}
 }
 
-func (c destroyPreviewCommand) waitForPreviewDestroyed(ctx context.Context, preview string) error {
-	timeout := 5 * time.Minute
+func (c destroyPreviewCommand) waitForPreviewDestroyed(ctx context.Context, preview string, timeout time.Duration) error {
 	ticker := time.NewTicker(1 * time.Second)
 	to := time.NewTicker(timeout)
 
 	for {
 		select {
 		case <-to.C:
-			return fmt.Errorf("%w: preview %s, time %s", errDestroyPreviewTimeout, preview, timeout.String())
+			return fmt.Errorf("%w: preview %s timed out after %s. Timeout can be increased using the '--timeout' flag", errDestroyPreviewTimeout, preview, timeout.String())
 		case <-ticker.C:
 			ns, err := c.k8sClient.CoreV1().Namespaces().Get(ctx, preview, metav1.GetOptions{})
 			if err != nil {

@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package okteto
 
 import (
@@ -5,6 +18,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/rest"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -16,12 +30,6 @@ func Test_IsLocalHostname(t *testing.T) {
 		hostname string
 		expected bool
 	}{
-
-		{
-			name:     "cloud",
-			hostname: "https://cloud.okteto.com",
-			expected: false,
-		},
 		{
 			name:     "172 non rfc",
 			hostname: "https://172.15.1.2:16443",
@@ -94,9 +102,9 @@ func Test_IsLocalHostname(t *testing.T) {
 
 func TestKubetokenRefreshRoundTrip(t *testing.T) {
 	tt := []struct {
-		name         string
 		handleFunc   http.HandlerFunc
 		expectedErr  error
+		name         string
 		expectedCode int
 	}{
 		{
@@ -126,9 +134,9 @@ func TestKubetokenRefreshRoundTrip(t *testing.T) {
 	}
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
-			testServer := httptest.NewServer(http.HandlerFunc(tc.handleFunc))
+			testServer := httptest.NewServer(tc.handleFunc)
 			defer testServer.Close()
-			transport := newTokenRotationTransport(http.DefaultTransport)
+			transport := newTokenRotationTransport(http.DefaultTransport, io.NewK8sLogger())
 			client := &http.Client{
 				Transport: transport,
 			}
@@ -138,6 +146,7 @@ func TestKubetokenRefreshRoundTrip(t *testing.T) {
 			resp, err := client.Do(req)
 			require.ErrorIs(t, err, tc.expectedErr)
 			if resp != nil {
+				require.NoError(t, resp.Body.Close())
 				require.Equal(t, tc.expectedCode, resp.StatusCode)
 			}
 		})
@@ -150,9 +159,9 @@ func TestGetK8sClientWithApiConfig(t *testing.T) {
 		cfg *rest.Config
 	}
 	tt := []struct {
-		name      string
-		apiConfig *clientcmdapi.Config
 		expected  expected
+		apiConfig *clientcmdapi.Config
+		name      string
 	}{
 		{
 			name: "ok",
@@ -187,7 +196,7 @@ func TestGetK8sClientWithApiConfig(t *testing.T) {
 	}
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
-			client, cfg, err := getK8sClientWithApiConfig(tc.apiConfig)
+			client, cfg, err := getK8sClientWithApiConfig(tc.apiConfig, nil)
 			require.ErrorIs(t, err, tc.expected.err)
 			require.NotNil(t, client)
 			require.NotNil(t, cfg)

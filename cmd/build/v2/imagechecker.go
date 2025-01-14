@@ -17,14 +17,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/okteto/okteto/pkg/build"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
-	oktetoLog "github.com/okteto/okteto/pkg/log"
-	"github.com/okteto/okteto/pkg/model"
+	"github.com/okteto/okteto/pkg/registry"
 )
 
 type imageCheckerInterface interface {
-	checkIfCommitHashIsBuilt(manifestName, svcToBuild string, buildInfo *model.BuildInfo) (string, bool)
-	getImageDigestFromAllPossibleTags(manifestName, svcToBuild string, buildInfo *model.BuildInfo) (string, error)
+	checkIfBuildHashIsBuilt(image, ns, registryURL, manifestName, svcToBuild, commit string, imageCtrl registry.ImageCtrl) (string, bool)
+	getImageDigestReferenceForServiceDeploy(manifestName, svcToBuild string, buildInfo *build.Info) (string, error)
 }
 
 type registryImageCheckerInterface interface {
@@ -35,74 +35,91 @@ type imageChecker struct {
 	tagger   imageTaggerInterface
 	cfg      oktetoBuilderConfigInterface
 	registry registryImageCheckerInterface
+	logger   loggerInfo
 
-	getImageSHA func(tag string, registry registryImageCheckerInterface) (string, error)
+	lookupReferenceWithDigest func(tag string, registry registryImageCheckerInterface) (string, error)
 }
 
 // newImageChecker returns a new image checker
-func newImageChecker(cfg oktetoBuilderConfigInterface, registry registryImageCheckerInterface, tagger imageTaggerInterface) imageChecker {
+func newImageChecker(cfg oktetoBuilderConfigInterface, registry registryImageCheckerInterface, tagger imageTaggerInterface, logger loggerInfo) imageChecker {
 	return imageChecker{
 		tagger:   tagger,
 		cfg:      cfg,
 		registry: registry,
+		logger:   logger,
 
-		getImageSHA: getImageSHA,
+		lookupReferenceWithDigest: lookupReferenceWithDigest,
 	}
 }
 
-func (ic imageChecker) checkIfCommitHashIsBuilt(manifestName, svcToBuild string, buildInfo *model.BuildInfo) (string, bool) {
-	sha := ic.cfg.GetBuildHash(buildInfo)
-	if sha == "" {
+// checkIfBuildHashIsBuilt returns if the buildHash is already built
+// in case is built, the image with digest ([name]@sha256:[sha]) is returned
+// if not, empty reference is returned
+func (ic imageChecker) checkIfBuildHashIsBuilt(image, ns, registryURL, manifestName, svcToBuild, buildHash string, imageCtrl registry.ImageCtrl) (string, bool) {
+	if buildHash == "" {
 		return "", false
 	}
-	tagsToCheck := ic.tagger.getPossibleHashImages(manifestName, svcToBuild, sha)
 
-	for _, tag := range tagsToCheck {
-		imageWithDigest, err := ic.getImageSHA(tag, ic.registry)
+	var referencesToCheck []string
+	if image != "" {
+		globalImage := ic.tagger.getGlobalTagFromDevIfNeccesary(image, ns, registryURL, buildHash, imageCtrl)
+		if globalImage != "" {
+			referencesToCheck = []string{globalImage}
+		}
+	} else {
+		// [name]:[tag] being the tag the buildHash
+		referencesToCheck = ic.tagger.getImageReferencesForTag(manifestName, svcToBuild, buildHash)
+	}
+
+	for _, ref := range referencesToCheck {
+		imageWithDigest, err := ic.lookupReferenceWithDigest(ref, ic.registry)
 		if err != nil {
 			if oktetoErrors.IsNotFound(err) {
 				continue
 			}
-			oktetoLog.Infof("could not check image %s: %s", tag, err)
-			return "", false
+			ic.logger.Infof("could not check image %s: %s", ref, err)
+			// If trying to get access to the image, it fails unexpectedly, we try with any other image (if any)
+			continue
 		}
+		ic.logger.Infof("image %s found", ref)
 		return imageWithDigest, true
 	}
 	return "", false
 }
 
-func (ic imageChecker) getImageDigestFromAllPossibleTags(manifestName, svcToBuild string, buildInfo *model.BuildInfo) (string, error) {
-	sha := ic.cfg.GetBuildHash(buildInfo)
+// getImageDigestReferenceForServiceDeploy returns the image reference with digest for the given service
+// format: [name]@sha256:[digest]. This is to being called during deploy operations (up, deploy, destroy, compose)
+// and it only checks the "okteto" tag
+func (ic imageChecker) getImageDigestReferenceForServiceDeploy(manifestName, svcToBuild string, buildInfo *build.Info) (string, error) {
 
-	var possibleTags []string
-	if !ic.cfg.IsOkteto() && shouldAddVolumeMounts(buildInfo) {
-		possibleTags = []string{buildInfo.Image}
-	} else if shouldAddVolumeMounts(buildInfo) {
-		possibleTags = ic.tagger.getPossibleTags(manifestName, svcToBuild, sha)
-	} else if shouldBuildFromDockerfile(buildInfo) && buildInfo.Image == "" {
-		possibleTags = ic.tagger.getPossibleTags(manifestName, svcToBuild, sha)
+	// get all possible references
+	var possibleReferences []string
+	if serviceHasDockerfile(buildInfo) && buildInfo.Image == "" {
+		possibleReferences = ic.tagger.getImageReferencesForDeploy(manifestName, svcToBuild)
 	} else if buildInfo.Image != "" {
-		possibleTags = []string{buildInfo.Image}
+		possibleReferences = []string{buildInfo.Image}
 	}
 
-	for _, tag := range possibleTags {
-		imageWithDigest, err := ic.getImageSHA(tag, ic.registry)
+	for _, ref := range possibleReferences {
+		imageWithDigest, err := ic.lookupReferenceWithDigest(ref, ic.registry)
 		if err != nil {
 			if oktetoErrors.IsNotFound(err) {
 				continue
 			}
 			// return error if the registry doesn't send a not found error
-			return "", fmt.Errorf("error checking image at registry %s: %v", tag, err)
+			return "", fmt.Errorf("error checking image at registry %s: %w", ref, err)
 		}
 		return imageWithDigest, nil
 	}
-	return "", fmt.Errorf("images [%s] not found", strings.Join(possibleTags, ", "))
+	return "", fmt.Errorf("images [%s] not found", strings.Join(possibleReferences, ", "))
 }
 
-func getImageSHA(tag string, registry registryImageCheckerInterface) (string, error) {
-	imageWithDigest, err := registry.GetImageTagWithDigest(tag)
+// lookupReferenceWithDigest returns the image reference with the digest format if found at the given registry.
+// format output: [name]@sha265:[digest]
+func lookupReferenceWithDigest(reference string, registry registryImageCheckerInterface) (string, error) {
+	imageWithDigest, err := registry.GetImageTagWithDigest(reference)
 	if err != nil {
-		return "", fmt.Errorf("error checking image at registry %s: %w", tag, err)
+		return "", fmt.Errorf("error checking image at registry %s: %w", reference, err)
 	}
 	return imageWithDigest, nil
 }

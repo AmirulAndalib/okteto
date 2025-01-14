@@ -1,4 +1,4 @@
-// Copyright 2021 The Okteto Authors
+// Copyright 2023 The Okteto Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,13 +17,16 @@ import (
 	"context"
 	"encoding/base64"
 	"testing"
+	"time"
 
 	"github.com/okteto/okteto/pkg/constants"
 	"github.com/okteto/okteto/pkg/model"
+	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -97,6 +100,7 @@ func Test_updateEnvsWithoutError(t *testing.T) {
 	envs := []string{
 		"ONE=value",
 		"TWO=values",
+		"URL=https://okteto.com?okteto=rocks",
 	}
 
 	err := UpdateEnvs(ctx, "test", namespace, envs, fakeClient)
@@ -145,10 +149,18 @@ func Test_updateEnvsWithError(t *testing.T) {
 
 func Test_AddDevAnnotations(t *testing.T) {
 	ctx := context.Background()
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
+			"example": {
+				Namespace: "unit-test",
+			},
+		},
+		CurrentContext: "example",
+	}
 	d := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "deployment",
-			Namespace:   "namespace",
+			Namespace:   "unit-test",
 			Labels:      map[string]string{},
 			Annotations: map[string]string{},
 		},
@@ -156,7 +168,6 @@ func Test_AddDevAnnotations(t *testing.T) {
 	fakeClient := fake.NewSimpleClientset(d)
 	t.Setenv(model.GithubRepositoryEnvVar, "git-repo")
 	manifest := &model.Manifest{
-		Namespace: "namespace",
 		Dev: model.ManifestDevs{
 			"not-found-deployment": &model.Dev{
 				Name: "not-found-deployment",
@@ -170,7 +181,7 @@ func Test_AddDevAnnotations(t *testing.T) {
 		},
 	}
 	AddDevAnnotations(ctx, manifest, fakeClient)
-	d, err := fakeClient.AppsV1().Deployments("namespace").Get(ctx, "deployment", metav1.GetOptions{})
+	d, err := fakeClient.AppsV1().Deployments("unit-test").Get(ctx, "deployment", metav1.GetOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t,
 		d.Annotations,
@@ -225,8 +236,8 @@ func Test_removeSensitiveDataFromGitURL(t *testing.T) {
 func Test_translateVariables(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    []string
 		expected string
+		input    []string
 	}{
 		{
 			name:     "nil input",
@@ -257,4 +268,80 @@ func Test_translateVariables(t *testing.T) {
 		})
 
 	}
+}
+func Test_AddPhaseDuration(t *testing.T) {
+	ctx := context.Background()
+	name := "test"
+	namespace := "test-namespace"
+	phase := "phase1"
+	duration := time.Second * 10
+	c := fake.NewSimpleClientset()
+
+	// Create a config map with existing phases
+	existingPhases := []phaseJSON{
+		{
+			Name:     "phase1",
+			Duration: 5,
+		},
+		{
+			Name:     "phase2",
+			Duration: 8,
+		},
+	}
+	existingCmap := &apiv1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TranslatePipelineName(name),
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			PhasesField: encodePhases(existingPhases),
+		},
+	}
+	_, err := c.CoreV1().ConfigMaps(namespace).Create(ctx, existingCmap, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	err = AddPhaseDuration(ctx, name, namespace, phase, duration, c)
+	assert.NoError(t, err)
+
+	// Verify that the phase duration is updated
+	updatedCmap, err := c.CoreV1().ConfigMaps(namespace).Get(ctx, TranslatePipelineName(name), metav1.GetOptions{})
+	assert.NoError(t, err)
+	updatedPhases := decodePhases(updatedCmap.Data[PhasesField])
+	assert.Equal(t, len(existingPhases), len(updatedPhases))
+	for _, p := range updatedPhases {
+		if p.Name == phase {
+			assert.Equal(t, duration.Seconds(), p.Duration)
+		}
+	}
+
+	// Verify that a new phase is added if it doesn't exist
+	newPhase := "new-phase"
+	newDuration := time.Second * 15
+	err = AddPhaseDuration(ctx, name, namespace, newPhase, newDuration, c)
+	assert.NoError(t, err)
+
+	updatedCmap, err = c.CoreV1().ConfigMaps(namespace).Get(ctx, TranslatePipelineName(name), metav1.GetOptions{})
+	assert.NoError(t, err)
+	updatedPhases = decodePhases(updatedCmap.Data[PhasesField])
+	assert.Equal(t, len(existingPhases)+1, len(updatedPhases))
+	found := false
+	for _, p := range updatedPhases {
+		if p.Name == newPhase {
+			assert.Equal(t, newDuration.Seconds(), p.Duration)
+			found = true
+			break
+		}
+	}
+	assert.True(t, found)
+}
+
+func encodePhases(phases []phaseJSON) string {
+	encodedPhases, _ := json.Marshal(phases)
+	return string(encodedPhases)
+}
+
+func decodePhases(encodedPhases string) []phaseJSON {
+	var phases []phaseJSON
+	_ = json.Unmarshal([]byte(encodedPhases), &phases)
+	return phases
 }

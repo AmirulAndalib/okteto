@@ -24,6 +24,7 @@ import (
 	"github.com/okteto/okteto/pkg/k8s/statefulsets"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model"
+	"github.com/okteto/okteto/pkg/okteto"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -59,11 +60,6 @@ func Get(ctx context.Context, dev *model.Dev, namespace string, c kubernetes.Int
 // IsDevModeOn returns if a statefulset is in devmode
 func IsDevModeOn(app App) bool {
 	return app.ObjectMeta().Labels[constants.DevLabel] == "true" || len(app.ObjectMeta().Labels[model.DevCloneLabel]) > 0
-}
-
-// SetLastBuiltAnnotation sets the app timestamp
-func SetLastBuiltAnnotation(app App) {
-	app.ObjectMeta().Annotations[model.LastBuiltAnnotation] = time.Now().UTC().Format(constants.TimeFormat)
 }
 
 // GetRunningPodInLoop returns the dev pod for an app and loops until it success
@@ -109,16 +105,16 @@ func GetRunningPodInLoop(ctx context.Context, dev *model.Dev, app App, c kuberne
 }
 
 // GetTranslations fills all the deployments pointed by a development container
-func GetTranslations(ctx context.Context, dev *model.Dev, app App, reset bool, c kubernetes.Interface) (map[string]*Translation, error) {
+func GetTranslations(ctx context.Context, namespace string, dev *model.Dev, app App, reset bool, c kubernetes.Interface) (map[string]*Translation, error) {
 	mainTr := &Translation{
 		MainDev: dev,
 		Dev:     dev,
 		App:     app,
-		Rules:   []*model.TranslationRule{dev.ToTranslationRule(dev, reset)},
+		Rules:   []*model.TranslationRule{dev.ToTranslationRule(dev, namespace, okteto.GetContext().Username, reset)},
 	}
 	result := map[string]*Translation{app.ObjectMeta().Name: mainTr}
 
-	if err := loadServiceTranslations(ctx, dev, reset, result, c); err != nil {
+	if err := loadServiceTranslations(ctx, namespace, dev, reset, result, c); err != nil {
 		return nil, err
 	}
 
@@ -138,14 +134,14 @@ func GetTranslations(ctx context.Context, dev *model.Dev, app App, reset bool, c
 	return result, nil
 }
 
-func loadServiceTranslations(ctx context.Context, dev *model.Dev, reset bool, result map[string]*Translation, c kubernetes.Interface) error {
+func loadServiceTranslations(ctx context.Context, namespace string, dev *model.Dev, reset bool, result map[string]*Translation, c kubernetes.Interface) error {
 	for _, s := range dev.Services {
-		app, err := Get(ctx, s, dev.Namespace, c)
+		app, err := Get(ctx, s, namespace, c)
 		if err != nil {
 			return err
 		}
 
-		rule := s.ToTranslationRule(dev, reset)
+		rule := s.ToTranslationRule(dev, okteto.GetContext().Username, okteto.GetContext().Username, reset)
 
 		if _, ok := result[app.ObjectMeta().Name]; ok {
 			result[app.ObjectMeta().Name].Rules = append(result[app.ObjectMeta().Name].Rules, rule)
@@ -176,9 +172,9 @@ func TranslateDevMode(trMap map[string]*Translation) error {
 
 // ListDevModeOn returns a list of strings with the names of deployments or statefulsets in DevMode.
 // If no app is found in dev mode, an empty slice is returned
-func ListDevModeOn(ctx context.Context, manifest *model.Manifest, c kubernetes.Interface) []string {
+func ListDevModeOn(ctx context.Context, devs model.ManifestDevs, ns string, c kubernetes.Interface) []string {
 	devModeApps := make([]string, 0)
-	for name, dev := range manifest.Dev {
+	for name, dev := range devs {
 		// when autocreate is active, the app name has suffix -okteto
 		// this should be taken into account when searching for dev mode apps
 		// we just want to modify the dev
@@ -187,7 +183,7 @@ func ListDevModeOn(ctx context.Context, manifest *model.Manifest, c kubernetes.I
 		if appDev.Autocreate {
 			appDev.Name = model.DevCloneName(appDev.Name)
 		}
-		app, err := Get(ctx, &appDev, manifest.Namespace, c)
+		app, err := Get(ctx, &appDev, ns, c)
 		if err != nil {
 			oktetoLog.Debugf("error listing dev-mode %s: %v", name, err)
 		}

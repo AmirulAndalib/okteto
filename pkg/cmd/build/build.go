@@ -22,20 +22,20 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/docker/api/types/versions"
-	"github.com/docker/docker/client"
-	"github.com/okteto/okteto/pkg/analytics"
+	"github.com/okteto/okteto/pkg/build"
+	"github.com/okteto/okteto/pkg/build/buildkit"
 	"github.com/okteto/okteto/pkg/config"
 	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/env"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/filesystem"
 	"github.com/okteto/okteto/pkg/format"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/registry"
 	"github.com/okteto/okteto/pkg/types"
-	"github.com/pkg/errors"
 	"github.com/spf13/afero"
 )
 
@@ -44,39 +44,56 @@ const (
 	doubleDockerfileWarning string = "Build '%s': Two Dockerfiles discovered in both the root and context path, defaulting to '%s/%s'"
 )
 
-var (
-	errDockerDaemonConnection = oktetoErrors.UserError{
-		E:    fmt.Errorf("cannot connect to Docker Daemon"),
-		Hint: "Please start the Docker Daemon or configure a builder endpoint with 'okteto context --builder BUILDKIT_URL",
-	}
-)
-
 // OktetoBuilderInterface runs the build of an image
 type OktetoBuilderInterface interface {
-	Run(ctx context.Context, buildOptions *types.BuildOptions) error
+	GetBuilder() string
+	Run(ctx context.Context, buildOptions *types.BuildOptions, ioCtrl *io.Controller) error
 }
 
 // OktetoBuilder runs the build of an image
-type OktetoBuilder struct{}
+type OktetoBuilder struct {
+	OktetoContext OktetoContextInterface
+	Fs            afero.Fs
+	metadata      *buildkit.BuildMetadata
+	logger        *io.Controller
+}
+
+func (ob *OktetoBuilder) GetMetadata() *buildkit.BuildMetadata {
+	return ob.metadata
+}
 
 // OktetoRegistryInterface checks if an image is at the registry
 type OktetoRegistryInterface interface {
 	GetImageTagWithDigest(imageTag string) (string, error)
 }
 
-// Run runs the build sequence
-func (ob *OktetoBuilder) Run(ctx context.Context, buildOptions *types.BuildOptions) error {
-	buildOptions.OutputMode = setOutputMode(buildOptions.OutputMode)
-	if okteto.Context().Builder == "" {
-		if err := ob.buildWithDocker(ctx, buildOptions); err != nil {
-			return err
-		}
-	} else {
-		if err := ob.buildWithOkteto(ctx, buildOptions); err != nil {
-			return err
-		}
+// NewOktetoBuilder creates a new instance of OktetoBuilder.
+// It takes an OktetoContextInterface and afero.Fs as parameters and returns a pointer to OktetoBuilder.
+func NewOktetoBuilder(context OktetoContextInterface, fs afero.Fs, logger *io.Controller) *OktetoBuilder {
+	return &OktetoBuilder{
+		OktetoContext: context,
+		Fs:            fs,
+		metadata:      &buildkit.BuildMetadata{},
+		logger:        logger,
 	}
-	return nil
+}
+
+func (ob *OktetoBuilder) GetBuilder() string {
+	return ob.OktetoContext.GetCurrentBuilder()
+}
+
+// Run runs the build sequence
+func (ob *OktetoBuilder) Run(ctx context.Context, buildOptions *types.BuildOptions, ioCtrl *io.Controller) error {
+	isRemoteExecution := buildOptions.OutputMode == DeployOutputModeOnBuild || buildOptions.OutputMode == DestroyOutputModeOnBuild || buildOptions.OutputMode == TestOutputModeOnBuild
+	buildOptions.OutputMode = setOutputMode(buildOptions.OutputMode)
+
+	if !isRemoteExecution {
+		builder := ob.GetBuilder()
+		buildMsg := fmt.Sprintf("Building '%s'", buildOptions.File)
+		ioCtrl.Out().Infof("%s in %s...", buildMsg, builder)
+	}
+
+	return ob.buildWithOkteto(ctx, buildOptions, ioCtrl, SolveBuild)
 }
 
 func setOutputMode(outputMode string) string {
@@ -94,157 +111,97 @@ func setOutputMode(outputMode string) string {
 
 }
 
-func (ob *OktetoBuilder) buildWithOkteto(ctx context.Context, buildOptions *types.BuildOptions) error {
-	oktetoLog.Infof("building your image on %s", okteto.Context().Builder)
-	buildkitClient, err := getBuildkitClient(ctx)
-	if err != nil {
-		return err
-	}
+func GetRegistryConfigFromOktetoConfig(okCtx OktetoContextInterface) *okteto.ConfigStateless {
 
+	return &okteto.ConfigStateless{
+		Cert:                        okCtx.GetCurrentCertStr(),
+		IsOkteto:                    okCtx.IsOktetoCluster(),
+		ContextName:                 okCtx.GetCurrentName(),
+		Namespace:                   okCtx.GetNamespace(),
+		RegistryUrl:                 okCtx.GetRegistryURL(),
+		UserId:                      okCtx.GetCurrentUser(),
+		Token:                       okCtx.GetCurrentToken(),
+		GlobalNamespace:             okCtx.GetGlobalNamespace(),
+		InsecureSkipTLSVerifyPolicy: okCtx.IsInsecure(),
+	}
+}
+
+func (ob *OktetoBuilder) buildWithOkteto(ctx context.Context, buildOptions *types.BuildOptions, ioCtrl *io.Controller, run buildkit.SolveBuildFn) error {
+	oktetoLog.Infof("building your image on %s", ob.OktetoContext.GetCurrentBuilder())
+
+	var err error
 	if buildOptions.File != "" {
-		buildOptions.File, err = GetDockerfile(buildOptions.File)
+		buildOptions.File, err = GetDockerfile(buildOptions.File, ob.OktetoContext)
 		if err != nil {
 			return err
 		}
 		defer os.Remove(buildOptions.File)
 	}
 
-	if buildOptions.Tag != "" {
-		err = validateImage(buildOptions.Tag)
-		if err != nil {
-			return err
-		}
-	}
-
-	imageCtrl := registry.NewImageCtrl(okteto.Config{})
-	if okteto.IsOkteto() {
-		buildOptions.DevTag = imageCtrl.ExpandOktetoDevRegistry(registry.GetDevTagFromGlobal(buildOptions.Tag))
-		buildOptions.Tag = imageCtrl.ExpandOktetoDevRegistry(buildOptions.Tag)
-		buildOptions.Tag = imageCtrl.ExpandOktetoGlobalRegistry(buildOptions.Tag)
-		for i := range buildOptions.CacheFrom {
-			buildOptions.CacheFrom[i] = imageCtrl.ExpandOktetoDevRegistry(buildOptions.CacheFrom[i])
-			buildOptions.CacheFrom[i] = imageCtrl.ExpandOktetoGlobalRegistry(buildOptions.CacheFrom[i])
-		}
-		for i := range buildOptions.ExportCache {
-			buildOptions.ExportCache[i] = imageCtrl.ExpandOktetoDevRegistry(buildOptions.ExportCache[i])
-			buildOptions.ExportCache[i] = imageCtrl.ExpandOktetoGlobalRegistry(buildOptions.ExportCache[i])
-		}
-	}
-
 	// create a temp folder - this will be remove once the build has finished
-	secretTempFolder := filepath.Join(config.GetOktetoHome(), ".secret")
-	if err := os.MkdirAll(secretTempFolder, 0700); err != nil {
-		return fmt.Errorf("failed to create %s: %s", secretTempFolder, err)
+	secretTempFolder, err := createSecretTempFolder()
+	if err != nil {
+		return err
 	}
 	defer os.RemoveAll(secretTempFolder)
 
-	// inject secrets to buildkit from temp folder
-	if err := replaceSecretsSourceEnvWithTempFile(afero.NewOsFs(), secretTempFolder, buildOptions); err != nil {
-		return fmt.Errorf("%w: secret should have the format 'id=mysecret,src=/local/secret'", err)
-	}
+	buildkitClientFactory := buildkit.NewBuildkitClientFactory(
+		ob.OktetoContext.GetCurrentCertStr(),
+		ob.OktetoContext.GetCurrentBuilder(),
+		ob.OktetoContext.GetCurrentToken(),
+		config.GetCertificatePath(),
+		ioCtrl)
 
-	opt, err := getSolveOpt(buildOptions)
-	if err != nil {
-		return errors.Wrap(err, "failed to create build solver")
-	}
+	buildkitWaiter := buildkit.NewBuildkitClientWaiter(buildkitClientFactory, ioCtrl)
 
-	err = solveBuild(ctx, buildkitClient, opt, buildOptions.OutputMode)
+	reg := registry.NewOktetoRegistry(GetRegistryConfigFromOktetoConfig(ob.OktetoContext))
+
+	optBuilder, err := buildkit.NewSolveOptBuilder(buildkitClientFactory, reg, ob.OktetoContext, ob.Fs, ioCtrl)
 	if err != nil {
-		oktetoLog.Infof("Failed to build image: %s", err.Error())
-	}
-	if isTransientError(err) {
-		oktetoLog.Yellow(`Failed to push '%s' to the registry:
-  %s,
-  Retrying ...`, buildOptions.Tag, err.Error())
-		success := true
-		err := solveBuild(ctx, buildkitClient, opt, buildOptions.OutputMode)
-		if err != nil {
-			success = false
-			oktetoLog.Infof("Failed to build image: %s", err.Error())
-		}
-		err = getErrorMessage(err, buildOptions.Tag)
-		analytics.TrackBuildTransientError(okteto.Context().Builder, success)
 		return err
 	}
 
-	if err == nil && buildOptions.Tag != "" {
-		if _, err := registry.NewOktetoRegistry(okteto.Config{}).GetImageTagWithDigest(buildOptions.Tag); err != nil {
-			oktetoLog.Yellow(`Failed to push '%s' metadata to the registry:
-	  %s,
-	  Retrying ...`, buildOptions.Tag, err.Error())
-			success := true
-			err := solveBuild(ctx, buildkitClient, opt, buildOptions.OutputMode)
-			if err != nil {
-				success = false
-				oktetoLog.Infof("Failed to build image: %s", err.Error())
+	opt, err := optBuilder.Build(ctx, buildOptions)
+	if err != nil {
+		return fmt.Errorf("failed to create build solver: %w", err)
+	}
+
+	buildSolver := buildkit.NewBuildkitRunner(buildkitClientFactory, buildkitWaiter, reg, run, ioCtrl)
+
+	if err := buildSolver.Run(ctx, opt, buildOptions.OutputMode); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateImages(okctx OktetoContextInterface, imageTags string) error {
+	reg := registry.NewOktetoRegistry(GetRegistryConfigFromOktetoConfig(okctx))
+
+	if strings.HasPrefix(imageTags, okctx.GetRegistryURL()) && strings.Count(imageTags, "/") == 2 {
+		return nil
+	}
+	numberOfSlashToBeCorrect := 2
+	tags := strings.Split(imageTags, ",")
+	imgCtrl := registry.NewImageCtrl(okctx)
+	for _, tag := range tags {
+		if reg.IsOktetoRegistry(tag) {
+			prefix := constants.DevRegistry
+			if reg.IsGlobalRegistry(tag) {
+				tag = imgCtrl.ExpandOktetoGlobalRegistry(tag)
+				prefix = constants.GlobalRegistry
+			} else {
+				tag = imgCtrl.ExpandOktetoDevRegistry(tag)
 			}
-			err = getErrorMessage(err, buildOptions.Tag)
-			analytics.TrackBuildPullError(okteto.Context().Builder, success)
-			return err
-		}
-	}
-
-	var tag string
-	if buildOptions != nil {
-		tag = buildOptions.Tag
-		if buildOptions.Manifest != nil && buildOptions.Manifest.Deploy != nil {
-			tag = buildOptions.Manifest.Deploy.Image
-		}
-	}
-	err = getErrorMessage(err, tag)
-	return err
-}
-
-// https://github.com/docker/cli/blob/56e5910181d8ac038a634a203a4f3550bb64991f/cli/command/image/build.go#L209
-func (ob *OktetoBuilder) buildWithDocker(ctx context.Context, buildOptions *types.BuildOptions) error {
-
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return err
-	}
-	if versions.GreaterThanOrEqualTo(cli.ClientVersion(), "1.39") {
-		err = buildWithDockerDaemonBuildkit(ctx, buildOptions, cli)
-		if err != nil {
-			return translateDockerErr(err)
-		}
-	} else {
-		err = buildWithDockerDaemon(ctx, buildOptions, cli)
-		if err != nil {
-			return translateDockerErr(err)
-		}
-	}
-	if buildOptions.Tag != "" {
-		return pushImage(ctx, buildOptions.Tag, cli)
-	}
-	return nil
-}
-
-func validateImage(imageTag string) error {
-	reg := registry.NewOktetoRegistry(okteto.Config{})
-	if strings.HasPrefix(imageTag, okteto.Context().Registry) && strings.Count(imageTag, "/") == 2 {
-		return nil
-	}
-	if (reg.IsOktetoRegistry(imageTag)) && strings.Count(imageTag, "/") != 1 {
-		prefix := constants.DevRegistry
-		if reg.IsGlobalRegistry(imageTag) {
-			prefix = constants.GlobalRegistry
-		}
-		return oktetoErrors.UserError{
-			E:    fmt.Errorf("'%s' isn't a valid image tag", imageTag),
-			Hint: fmt.Sprintf("The Okteto Registry syntax is: '%s/image_name'", prefix),
+			if strings.Count(tag, "/") != numberOfSlashToBeCorrect {
+				return oktetoErrors.UserError{
+					E:    fmt.Errorf("'%s' isn't a valid image tag", tag),
+					Hint: fmt.Sprintf("The Okteto Registry syntax is: '%s/image_name'", prefix),
+				}
+			}
 		}
 	}
 	return nil
-}
-
-func translateDockerErr(err error) error {
-	if err == nil {
-		return nil
-	}
-	if strings.HasPrefix(err.Error(), "failed to dial gRPC: cannot connect to the Docker daemon") {
-		return errDockerDaemonConnection
-	}
-	return err
 }
 
 type regInterface interface {
@@ -257,7 +214,7 @@ type regInterface interface {
 }
 
 // OptsFromBuildInfo returns the parsed options for the build from the manifest
-func OptsFromBuildInfo(manifestName, svcName string, b *model.BuildInfo, o *types.BuildOptions, reg regInterface) *types.BuildOptions {
+func OptsFromBuildInfo(manifestName, svcName string, b *build.Info, o *types.BuildOptions, reg regInterface, okCtx OktetoContextInterface) *types.BuildOptions {
 	if o == nil {
 		o = &types.BuildOptions{}
 	}
@@ -273,35 +230,30 @@ func OptsFromBuildInfo(manifestName, svcName string, b *model.BuildInfo, o *type
 
 	// manifestName can be not sanitized when option name is used at deploy
 	sanitizedName := format.ResourceK8sMetaString(manifestName)
-	if okteto.Context().IsOkteto && b.Image == "" {
-		// if flag --global, point to global registry
-		targetRegistry := constants.DevRegistry
-		if o != nil && o.BuildToGlobal {
-			targetRegistry = constants.GlobalRegistry
-		}
-		b.Image = fmt.Sprintf("%s/%s-%s:%s", targetRegistry, sanitizedName, svcName, model.OktetoDefaultImageTag)
-		if len(b.VolumesToInclude) > 0 {
-			b.Image = fmt.Sprintf("%s/%s-%s:%s", targetRegistry, sanitizedName, svcName, model.OktetoImageTagWithVolumes)
-		}
+	if okCtx.IsOktetoCluster() && b.Image == "" {
+		b.Image = fmt.Sprintf("%s/%s-%s:%s", constants.DevRegistry, sanitizedName, svcName, model.OktetoDefaultImageTag)
 	}
 
 	file := b.Dockerfile
 	if b.Context != "" && b.Dockerfile != "" {
-		file = extractFromContextAndDockerfile(b.Context, b.Dockerfile, svcName)
+		file = extractFromContextAndDockerfile(b.Context, b.Dockerfile, svcName, os.Getwd)
 	}
 
-	args := []model.BuildArg{}
+	args := []build.Arg{}
 	optionsBuildArgs := map[string]string{}
+	minArgFormatParts := 1
+	maxArgFormatParts := 2
 	for _, arg := range o.BuildArgs {
-		splittedArg := strings.SplitN(arg, "=", 2)
-		if len(splittedArg) == 1 {
+
+		splittedArg := strings.SplitN(arg, "=", maxArgFormatParts)
+		if len(splittedArg) == minArgFormatParts {
 			optionsBuildArgs[splittedArg[0]] = ""
-			args = append(args, model.BuildArg{
+			args = append(args, build.Arg{
 				Name: splittedArg[0], Value: "",
 			})
-		} else if len(splittedArg) == 2 {
+		} else if len(splittedArg) == maxArgFormatParts {
 			optionsBuildArgs[splittedArg[0]] = splittedArg[1]
-			args = append(args, model.BuildArg{
+			args = append(args, build.Arg{
 				Name: splittedArg[0], Value: splittedArg[1],
 			})
 		} else {
@@ -318,8 +270,8 @@ func OptsFromBuildInfo(manifestName, svcName string, b *model.BuildInfo, o *type
 
 	if reg.IsOktetoRegistry(b.Image) {
 		defaultBuildArgs := map[string]string{
-			model.OktetoContextEnvVar:   okteto.Context().Name,
-			model.OktetoNamespaceEnvVar: okteto.Context().Namespace,
+			model.OktetoContextEnvVar:   okCtx.GetCurrentName(),
+			model.OktetoNamespaceEnvVar: okCtx.GetNamespace(),
 		}
 
 		for _, e := range b.Args {
@@ -335,7 +287,7 @@ func OptsFromBuildInfo(manifestName, svcName string, b *model.BuildInfo, o *type
 				continue
 			}
 
-			args = append(args, model.BuildArg{
+			args = append(args, build.Arg{
 				Name: key, Value: val,
 			})
 		}
@@ -347,7 +299,7 @@ func OptsFromBuildInfo(manifestName, svcName string, b *model.BuildInfo, o *type
 		Path:        b.Context,
 		Tag:         b.Image,
 		File:        file,
-		BuildArgs:   model.SerializeBuildArgs(args),
+		BuildArgs:   build.SerializeArgs(args),
 		NoCache:     o.NoCache,
 		ExportCache: b.ExportCache,
 		Platform:    o.Platform,
@@ -372,7 +324,7 @@ func OptsFromBuildInfo(manifestName, svcName string, b *model.BuildInfo, o *type
 }
 
 // OptsFromBuildInfoForRemoteDeploy returns the options for the remote deploy
-func OptsFromBuildInfoForRemoteDeploy(b *model.BuildInfo, o *types.BuildOptions) *types.BuildOptions {
+func OptsFromBuildInfoForRemoteDeploy(b *build.Info, o *types.BuildOptions) *types.BuildOptions {
 	opts := &types.BuildOptions{
 		Path:       b.Context,
 		OutputMode: o.OutputMode,
@@ -382,22 +334,42 @@ func OptsFromBuildInfoForRemoteDeploy(b *model.BuildInfo, o *types.BuildOptions)
 	return opts
 }
 
-func extractFromContextAndDockerfile(context, dockerfile, svcName string) string {
+func extractFromContextAndDockerfile(context, dockerfile, svcName string, getWd func() (string, error)) string {
 	if filepath.IsAbs(dockerfile) {
 		return dockerfile
 	}
 
+	fs := afero.NewOsFs()
+
 	joinPath := filepath.Join(context, dockerfile)
-	if !filesystem.FileExistsAndNotDir(joinPath) {
+	if !filesystem.FileExistsAndNotDir(joinPath, fs) {
 		oktetoLog.Warning(fmt.Sprintf(warningDockerfilePath, svcName, dockerfile, context))
 		return dockerfile
 	}
 
-	if joinPath != filepath.Clean(dockerfile) && filesystem.FileExistsAndNotDir(dockerfile) {
+	wd, err := getWd()
+	if err != nil {
+		return joinPath
+	}
+
+	if !filepath.IsAbs(joinPath) {
+		joinPath = filepath.Join(wd, joinPath)
+	}
+
+	if joinPath != filepath.Join(wd, filepath.Clean(dockerfile)) && filesystem.FileExistsAndNotDir(dockerfile, fs) {
 		oktetoLog.Warning(fmt.Sprintf(doubleDockerfileWarning, svcName, context, dockerfile))
 	}
 
 	return joinPath
+}
+
+func createSecretTempFolder() (string, error) {
+	secretTempFolder := filepath.Join(config.GetOktetoHome(), ".secret")
+	if err := os.MkdirAll(secretTempFolder, 0700); err != nil {
+		return "", fmt.Errorf("failed to create %s: %s", secretTempFolder, err)
+	}
+
+	return secretTempFolder, nil
 }
 
 // replaceSecretsSourceEnvWithTempFile reads the content of the src of a secret and replaces the envs to mount into dockerfile
@@ -452,14 +424,14 @@ func createTempFileWithExpandedEnvsAtSource(fs afero.Fs, sourceFile, tempFolder 
 	sc := bufio.NewScanner(srcFile)
 	for sc.Scan() {
 		// expand content
-		srcContent, err := model.ExpandEnv(sc.Text(), true)
+		srcContent, err := env.ExpandEnv(sc.Text())
 		if err != nil {
 			return "", err
 		}
 
 		// save expanded to temp file
 		if _, err = writer.Write([]byte(fmt.Sprintf("%s\n", srcContent))); err != nil {
-			return "", fmt.Errorf("unable to write to temp file: %s", err)
+			return "", fmt.Errorf("unable to write to temp file: %w", err)
 		}
 		writer.Flush()
 	}

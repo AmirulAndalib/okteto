@@ -22,15 +22,18 @@ import (
 	"strings"
 
 	contextCMD "github.com/okteto/okteto/cmd/context"
-	"github.com/okteto/okteto/cmd/utils"
 	"github.com/okteto/okteto/pkg/devenvironment"
+	"github.com/okteto/okteto/pkg/endpoints"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
-	"github.com/okteto/okteto/pkg/externalresource"
+	"github.com/okteto/okteto/pkg/filesystem"
 	"github.com/okteto/okteto/pkg/format"
 	"github.com/okteto/okteto/pkg/k8s/ingresses"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/okteto"
+	"github.com/okteto/okteto/pkg/validator"
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 )
 
@@ -44,7 +47,11 @@ type EndpointsOptions struct {
 }
 
 type endpointGetterInterface interface {
-	List(ctx context.Context, ns string, labelSelector string) ([]externalresource.ExternalResource, error)
+	List(ctx context.Context, ns string, devName string) ([]string, error)
+}
+
+type endpointControlInterface interface {
+	List(ctx context.Context, opts *EndpointsOptions, devName string) ([]string, error)
 }
 
 type k8sIngressClientProvider interface {
@@ -52,69 +59,61 @@ type k8sIngressClientProvider interface {
 }
 
 type EndpointGetter struct {
-	GetManifest       func(path string) (*model.Manifest, error)
-	endpointControl   endpointGetterInterface
-	K8sClientProvider k8sIngressClientProvider
+	GetManifest     func(path string, fs afero.Fs) (*model.Manifest, error)
+	endpointControl endpointControlInterface
 }
 
-func NewEndpointGetter() (EndpointGetter, error) {
-	k8sProvider := okteto.NewK8sClientProvider()
-	_, cfg, err := k8sProvider.Provide(okteto.Context().Cfg)
-	if err != nil {
-		return EndpointGetter{}, fmt.Errorf("error getting kubernetes client: %w", err)
+func NewEndpointGetter(k8sLogger *io.K8sLogger) (EndpointGetter, error) {
+	var endpointControl endpointControlInterface
+	if okteto.GetContext().IsOkteto {
+		c, err := okteto.NewOktetoClient()
+		if err != nil {
+			return EndpointGetter{}, err
+		}
+		endpointControl = NewEndpointGetterWithOktetoAPI(c)
+	} else {
+		endpointControl = NewEndpointGetterInStandaloneMode(k8sLogger)
 	}
 
-	ec := externalresource.NewExternalK8sControl(cfg)
 	return EndpointGetter{
-		GetManifest:       model.GetManifestV2,
-		endpointControl:   ec,
-		K8sClientProvider: k8sProvider,
+		GetManifest:     model.GetManifestV2,
+		endpointControl: endpointControl,
 	}, nil
 
 }
 
-// Endpoints deploys the okteto manifest
-func Endpoints(ctx context.Context) *cobra.Command {
+// Endpoints lists the endpoints for a development environment
+func Endpoints(ctx context.Context, k8sLogger *io.K8sLogger) *cobra.Command {
 	options := &EndpointsOptions{}
+	fs := afero.NewOsFs()
 	cmd := &cobra.Command{
 		Use:   "endpoints",
-		Short: "Show endpoints for an environment",
+		Short: "List the public endpoints of your Development Environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if options.ManifestPath != "" {
-				workdir := model.GetWorkdirFromManifestPath(options.ManifestPath)
+				workdir := filesystem.GetWorkdirFromManifestPath(options.ManifestPath)
 				if err := os.Chdir(workdir); err != nil {
 					return err
 				}
-				options.ManifestPath = model.GetManifestPathFromWorkdir(options.ManifestPath, workdir)
-			}
+				options.ManifestPath = filesystem.GetManifestPathFromWorkdir(options.ManifestPath, workdir)
 
-			ctxResource, err := utils.LoadManifestContext(options.ManifestPath)
-			if err != nil {
-				if oktetoErrors.IsNotExist(err) {
-					ctxResource = &model.ContextResource{}
+				if err := validator.FileArgumentIsNotDir(fs, options.ManifestPath); err != nil {
+					return err
 				}
+
 			}
 
-			if err := ctxResource.UpdateNamespace(options.Namespace); err != nil {
+			// false for 'json' and 'md' to avoid breaking their syntax
+			showCtxHeader := options.Output == ""
+			if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.Options{Namespace: options.Namespace, Context: options.K8sContext, Show: showCtxHeader}); err != nil {
 				return err
 			}
 
-			if err := ctxResource.UpdateContext(options.K8sContext); err != nil {
-				return err
+			if !okteto.IsOkteto() {
+				return oktetoErrors.ErrContextIsNotOktetoCluster
 			}
 
-			ctxOptions := &contextCMD.ContextOptions{
-				Context:   ctxResource.Context,
-				Namespace: ctxResource.Namespace,
-			}
-			if options.Output == "" {
-				ctxOptions.Show = true
-			}
-			if err := contextCMD.NewContextCommand().Run(ctx, ctxOptions); err != nil {
-				return err
-			}
-
-			eg, err := NewEndpointGetter()
+			eg, err := NewEndpointGetter(k8sLogger)
 			if err != nil {
 				return err
 			}
@@ -124,26 +123,26 @@ func Endpoints(ctx context.Context) *cobra.Command {
 			}
 
 			if options.Name == "" {
-				manifest, err := eg.GetManifest(options.ManifestPath)
+				manifest, err := eg.GetManifest(options.ManifestPath, afero.NewOsFs())
 				if err != nil {
 					return err
 				}
 				if manifest.Name != "" {
 					options.Name = manifest.Name
 				} else {
-					c, _, err := okteto.NewK8sClientProvider().Provide(okteto.Context().Cfg)
+					c, _, err := okteto.NewK8sClientProviderWithLogger(k8sLogger).Provide(okteto.GetContext().Cfg)
 					if err != nil {
 						return err
 					}
 					inferer := devenvironment.NewNameInferer(c)
-					options.Name = inferer.InferName(ctx, cwd, okteto.Context().Namespace, options.ManifestPath)
+					options.Name = inferer.InferName(ctx, cwd, okteto.GetContext().Namespace, options.ManifestPath)
 				}
 				if options.Namespace == "" {
-					options.Namespace = manifest.Namespace
+					options.Namespace = okteto.GetContext().Namespace
 				}
 			}
 			if options.Namespace == "" {
-				options.Namespace = okteto.Context().Namespace
+				options.Namespace = okteto.GetContext().Namespace
 			}
 
 			if err := validateOutput(options.Output); err != nil {
@@ -152,10 +151,10 @@ func Endpoints(ctx context.Context) *cobra.Command {
 			return eg.showEndpoints(ctx, options)
 		},
 	}
-	cmd.Flags().StringVar(&options.Name, "name", "", "development environment name")
-	cmd.Flags().StringVarP(&options.ManifestPath, "file", "f", "", "path to the okteto manifest file")
-	cmd.Flags().StringVarP(&options.Namespace, "namespace", "n", "", "overwrites the namespace where the development environment is deployed")
-	cmd.Flags().StringVarP(&options.K8sContext, "context", "c", "", "context where the development environment is deployed")
+	cmd.Flags().StringVar(&options.Name, "name", "", "the name of the Development Environment")
+	cmd.Flags().StringVarP(&options.ManifestPath, "file", "f", "", "the path to the Okteto Manifest")
+	cmd.Flags().StringVarP(&options.Namespace, "namespace", "n", "", "overwrite the current Okteto Namespace")
+	cmd.Flags().StringVarP(&options.K8sContext, "context", "c", "", "overwrite the current Okteto Context")
 
 	cmd.Flags().StringVarP(&options.Output, "output", "o", "", "output format. One of: ['json', 'md']")
 
@@ -179,31 +178,65 @@ func (eg *EndpointGetter) getEndpoints(ctx context.Context, opts *EndpointsOptio
 	}
 
 	sanitizedName := format.ResourceK8sMetaString(opts.Name)
-	labelSelector := fmt.Sprintf("%s=%s", model.DeployedByLabel, sanitizedName)
-	iClient, err := eg.K8sClientProvider.GetIngressClient()
-	if err != nil {
-		return nil, err
-	}
-	eps, err := iClient.GetEndpointsBySelector(ctx, opts.Namespace, labelSelector)
-	if err != nil {
-		return nil, err
-	}
 
-	externalEps, err := eg.endpointControl.List(ctx, opts.Namespace, labelSelector)
+	eps, err := eg.endpointControl.List(ctx, opts, sanitizedName)
 	if err != nil {
 		return nil, err
-	}
-
-	for _, externalEp := range externalEps {
-		for _, ep := range externalEp.Endpoints {
-			eps = append(eps, fmt.Sprintf("%s (external)", ep.Url))
-		}
 	}
 
 	if len(eps) > 0 {
 		sort.Slice(eps, func(i, j int) bool {
 			return len(eps[i]) < len(eps[j])
 		})
+	}
+	return eps, nil
+}
+
+type endpointGetterWithOktetoAPI struct {
+	endpointControl endpointGetterInterface
+}
+
+func NewEndpointGetterWithOktetoAPI(c *okteto.Client) *endpointGetterWithOktetoAPI {
+	return &endpointGetterWithOktetoAPI{
+		endpointControl: endpoints.NewEndpointControl(c),
+	}
+}
+
+func (eg *endpointGetterWithOktetoAPI) List(ctx context.Context, opts *EndpointsOptions, devName string) ([]string, error) {
+	return eg.endpointControl.List(ctx, opts.Namespace, devName)
+}
+
+type endpointGetterInStandaloneMode struct {
+	k8sClientProvider k8sIngressClientProvider
+	getEndpoints      func(context.Context, *EndpointsOptions, string, k8sIngressClientProvider) ([]string, error)
+}
+
+func NewEndpointGetterInStandaloneMode(k8sLogger *io.K8sLogger) *endpointGetterInStandaloneMode {
+	return &endpointGetterInStandaloneMode{
+		k8sClientProvider: okteto.NewK8sClientProviderWithLogger(k8sLogger),
+		getEndpoints:      getEndpointsStandaloneMode,
+	}
+}
+
+func (eg *endpointGetterInStandaloneMode) List(ctx context.Context, opts *EndpointsOptions, devName string) ([]string, error) {
+	labelSelector := fmt.Sprintf("%s=%s", model.DeployedByLabel, devName)
+	eps, err := eg.getEndpoints(ctx, opts, labelSelector, eg.k8sClientProvider)
+	if err != nil {
+		return nil, err
+	}
+
+	return eps, nil
+}
+
+func getEndpointsStandaloneMode(ctx context.Context, opts *EndpointsOptions, labelSelector string, k8sClientProvider k8sIngressClientProvider) ([]string, error) {
+	var eps []string
+	iClient, err := k8sClientProvider.GetIngressClient()
+	if err != nil {
+		return nil, err
+	}
+	eps, err = iClient.GetEndpointsBySelector(ctx, opts.Namespace, labelSelector)
+	if err != nil {
+		return nil, err
 	}
 	return eps, nil
 }
@@ -232,7 +265,7 @@ func (dc *EndpointGetter) showEndpoints(ctx context.Context, opts *EndpointsOpti
 		}
 	default:
 		if len(eps) == 0 {
-			oktetoLog.Information("There are no available endpoints for '%s'.\n    Follow this link to know more about how to create public endpoints for your application:\n    https://www.okteto.com/docs/cloud/ssl/", opts.Name)
+			oktetoLog.Information("There are no available endpoints for '%s'.\n    Follow this link to know more about how to create public endpoints for your application:\n    https://www.okteto.com/docs/core/endpoints/automatic-ssl", opts.Name)
 		} else {
 			oktetoLog.Information("Endpoints available:")
 			oktetoLog.Printf("  - %s\n", strings.Join(eps, "\n  - "))

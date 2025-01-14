@@ -17,29 +17,196 @@ import (
 	"context"
 	"testing"
 
+	"github.com/okteto/okteto/pkg/deployable"
+	"github.com/okteto/okteto/pkg/externalresource"
 	"github.com/okteto/okteto/pkg/model"
-	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-func TestDeployNotRemovingEnvFile(t *testing.T) {
-	fs := afero.NewMemMapFs()
+type fakeRunner struct {
+	mock.Mock
+}
 
-	_, err := fs.Create(".env")
-	require.NoError(t, err)
+func (f *fakeRunner) RunDeploy(ctx context.Context, params deployable.DeployParameters) error {
+	args := f.Called(ctx, params)
+	return args.Error(0)
+}
+
+func (f *fakeRunner) CleanUp(ctx context.Context, err error) {
+	f.Called(ctx, err)
+}
+
+func TestDeploy(t *testing.T) {
+	r := &fakeRunner{}
 	opts := &Options{
+		Name:      "test",
+		Namespace: "ns",
 		Manifest: &model.Manifest{
-			Deploy: &model.DeployInfo{},
+			Deploy: &model.DeployInfo{
+				Commands: []model.DeployCommand{
+					{
+						Name:    "test command",
+						Command: "echo",
+					},
+				},
+				Divert: &model.DivertDeploy{
+					Namespace: "ns",
+					Driver:    "test driver",
+				},
+			},
+			ManifestPath: "path to manifest",
+			External: externalresource.Section{
+				"db": {
+					Icon: "icon",
+					Endpoints: []*externalresource.ExternalEndpoint{
+						{
+							Name: "name",
+							Url:  "url",
+						},
+					},
+				},
+			},
+		},
+		Variables: []string{
+			"A=value1",
+			"B=value2",
 		},
 	}
-	localDeployer := localDeployer{
-		ConfigMapHandler: &fakeCmapHandler{},
-		Fs:               fs,
-	}
-	err = localDeployer.runDeploySection(context.Background(), opts)
-	assert.NoError(t, err)
-	_, err = fs.Stat(".env")
-	require.NoError(t, err)
 
+	expectedParams := deployable.DeployParameters{
+		Name:      "test",
+		Namespace: "ns",
+		Variables: []string{
+			"A=value1",
+			"B=value2",
+		},
+		ManifestPath: "path to manifest",
+		Deployable: deployable.Entity{
+			Commands: []model.DeployCommand{
+				{
+					Name:    "test command",
+					Command: "echo",
+				},
+			},
+			Divert: &model.DivertDeploy{
+				Namespace: "ns",
+				Driver:    "test driver",
+			},
+			External: externalresource.Section{
+				"db": {
+					Icon: "icon",
+					Endpoints: []*externalresource.ExternalEndpoint{
+						{
+							Name: "name",
+							Url:  "url",
+						},
+					},
+				},
+			},
+		},
+	}
+	r.On("RunDeploy", mock.Anything, expectedParams).Return(assert.AnError)
+
+	d := newLocalDeployer(r)
+	err := d.Deploy(context.Background(), opts)
+
+	require.ErrorIs(t, err, assert.AnError)
+	r.AssertExpectations(t)
+}
+
+func TestDeployWithEmptyManifest(t *testing.T) {
+	r := &fakeRunner{}
+	opts := &Options{
+		Name: "test",
+		Variables: []string{
+			"A=value1",
+			"B=value2",
+		},
+	}
+
+	expectedParams := deployable.DeployParameters{
+		Name: "test",
+		Variables: []string{
+			"A=value1",
+			"B=value2",
+		},
+		Deployable: deployable.Entity{
+			External: externalresource.Section{},
+		},
+	}
+	r.On("RunDeploy", mock.Anything, expectedParams).Return(assert.AnError)
+
+	d := newLocalDeployer(r)
+	err := d.Deploy(context.Background(), opts)
+
+	require.ErrorIs(t, err, assert.AnError)
+	r.AssertExpectations(t)
+}
+
+func TestDeployWithEmptyDeploySection(t *testing.T) {
+	r := &fakeRunner{}
+	opts := &Options{
+		Name: "test",
+		Variables: []string{
+			"A=value1",
+			"B=value2",
+		},
+		Namespace: "ns",
+		Manifest: &model.Manifest{
+			ManifestPath: "path to manifest",
+			External: externalresource.Section{
+				"db": {
+					Icon: "icon",
+					Endpoints: []*externalresource.ExternalEndpoint{
+						{
+							Name: "name",
+							Url:  "url",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	expectedParams := deployable.DeployParameters{
+		Name:      "test",
+		Namespace: "ns",
+		Variables: []string{
+			"A=value1",
+			"B=value2",
+		},
+		ManifestPath: "path to manifest",
+		Deployable: deployable.Entity{
+			External: externalresource.Section{
+				"db": {
+					Icon: "icon",
+					Endpoints: []*externalresource.ExternalEndpoint{
+						{
+							Name: "name",
+							Url:  "url",
+						},
+					},
+				},
+			},
+		},
+	}
+	r.On("RunDeploy", mock.Anything, expectedParams).Return(assert.AnError)
+
+	d := newLocalDeployer(r)
+	err := d.Deploy(context.Background(), opts)
+
+	require.ErrorIs(t, err, assert.AnError)
+	r.AssertExpectations(t)
+}
+
+func TestCleanUp(t *testing.T) {
+	r := &fakeRunner{}
+	r.On("CleanUp", mock.Anything, assert.AnError)
+
+	d := newLocalDeployer(r)
+	d.CleanUp(context.Background(), assert.AnError)
+
+	r.AssertExpectations(t)
 }

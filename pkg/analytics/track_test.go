@@ -26,9 +26,9 @@ func TestMain(m *testing.M) {
 		Enabled:   false,
 		MachineID: "machine-id",
 	}
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {
 				Name:      "test",
 				Namespace: "namespace",
@@ -68,11 +68,11 @@ func Test_getTrackID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 
-			os.Setenv(constants.OktetoHomeEnvVar, dir)
+			t.Setenv(constants.OktetoHomeEnvVar, dir)
 
 			a := get()
 			a.MachineID = tt.machineID
-			okteto.Context().UserID = tt.userID
+			okteto.GetContext().UserID = tt.userID
 
 			trackID := getTrackID()
 
@@ -93,38 +93,30 @@ func Test_getTrackID(t *testing.T) {
 
 func Test_disabledInOktetoCluster(t *testing.T) {
 	var tests = []struct {
+		contextStore *okteto.ContextStore
 		name         string
-		contextStore *okteto.OktetoContextStore
 		expected     bool
 	}{
 		{
-			name: "cloud-always-enabled",
-			contextStore: &okteto.OktetoContextStore{
-				Contexts:       map[string]*okteto.OktetoContext{okteto.CloudURL: {Name: okteto.CloudURL, IsOkteto: true, Analytics: false}},
-				CurrentContext: okteto.CloudURL,
-			},
-			expected: false,
-		},
-		{
 			name: "vanilla-always-enabled",
-			contextStore: &okteto.OktetoContextStore{
-				Contexts:       map[string]*okteto.OktetoContext{"minikube": {Name: "minikube", IsOkteto: false, Analytics: true}},
+			contextStore: &okteto.ContextStore{
+				Contexts:       map[string]*okteto.Context{"minikube": {Name: "minikube", IsOkteto: false, Analytics: true}},
 				CurrentContext: "minikube",
 			},
 			expected: false,
 		},
 		{
 			name: "admin-enabled",
-			contextStore: &okteto.OktetoContextStore{
-				Contexts:       map[string]*okteto.OktetoContext{"oe": {Name: "oe", IsOkteto: true, Analytics: true}},
+			contextStore: &okteto.ContextStore{
+				Contexts:       map[string]*okteto.Context{"oe": {Name: "oe", IsOkteto: true, Analytics: true}},
 				CurrentContext: "oe",
 			},
 			expected: false,
 		},
 		{
 			name: "admin-disabled",
-			contextStore: &okteto.OktetoContextStore{
-				Contexts:       map[string]*okteto.OktetoContext{"oe": {Name: "oe", IsOkteto: true, Analytics: false}},
+			contextStore: &okteto.ContextStore{
+				Contexts:       map[string]*okteto.Context{"oe": {Name: "oe", IsOkteto: true, Analytics: false}},
 				CurrentContext: "oe",
 			},
 			expected: true,

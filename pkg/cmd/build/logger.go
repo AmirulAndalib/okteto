@@ -17,13 +17,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/okteto/okteto/pkg/types"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/moby/buildkit/client"
+	"github.com/okteto/okteto/pkg/build/buildkit"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/types"
 	"github.com/tonistiigi/units"
+)
+
+var (
+	nameRegex = regexp.MustCompile(`--name\s+"([^"]+)"`)
 )
 
 const (
@@ -45,11 +51,17 @@ func deployDisplayer(ctx context.Context, ch chan *client.SolveStatus, o *types.
 	var done bool
 	var outputMode string
 
-	if o.OutputMode == "destroy" {
-		outputMode = "destroy"
-	} else {
-		outputMode = "deploy"
+	switch o.OutputMode {
+	case DeployOutputModeOnBuild:
+		outputMode = DeployOutputModeOnBuild
+	case DestroyOutputModeOnBuild:
+		outputMode = DestroyOutputModeOnBuild
+	case TestOutputModeOnBuild:
+		outputMode = TestOutputModeOnBuild
+	default:
+		outputMode = DeployOutputModeOnBuild
 	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -79,20 +91,10 @@ func deployDisplayer(ctx context.Context, ch chan *client.SolveStatus, o *types.
 }
 
 type trace struct {
+	err           error
 	ongoing       map[string]*vertexInfo
 	stages        map[string]bool
 	showCtxAdvice bool
-
-	err error
-}
-
-type OktetoCommandErr struct {
-	Stage string
-	Err   error
-}
-
-func (e OktetoCommandErr) Error() string {
-	return fmt.Sprintf("error on stage %s: %s", e.Stage, e.Err.Error())
 }
 
 func newTrace() *trace {
@@ -108,12 +110,16 @@ func (t *trace) update(ss *client.SolveStatus) error {
 		v, ok := t.ongoing[rawVertex.Digest.Encoded()]
 		if !ok {
 			v = &vertexInfo{
-				name: rawVertex.Name,
+				name:   rawVertex.Name,
+				cached: rawVertex.Cached,
 			}
 			t.ongoing[rawVertex.Digest.Encoded()] = v
 		}
 		if rawVertex.Error != "" {
 			return fmt.Errorf("error on stage %s: %s", rawVertex.Name, rawVertex.Error)
+		}
+		if rawVertex.Cached {
+			v.cached = true
 		}
 		if rawVertex.Completed != nil {
 			v.completed = true
@@ -147,21 +153,29 @@ func (t *trace) display(progress string) {
 				currentLoadedCtx := units.Bytes(v.currentTransferedContext)
 				if t.showCtxAdvice && currentLoadedCtx > largeContextThreshold {
 					t.showCtxAdvice = false
-					oktetoLog.Information("You can use '.oktetodeployignore' file to optimize the context used to deploy your development environment.")
+					oktetoLog.Information("You can use '.oktetoignore' file to optimize the context used to deploy your development environment.")
 				}
 				oktetoLog.Spinner(fmt.Sprintf("Synchronizing context: %.2f", currentLoadedCtx))
 			}
 		}
 		if t.hasCommandLogs(v) {
-			if progress == "deploy" {
+			switch progress {
+			case DeployOutputModeOnBuild:
 				oktetoLog.Spinner("Deploying your development environment...")
-			} else {
+			case DestroyOutputModeOnBuild:
 				oktetoLog.Spinner("Destroying your development environment...")
+			case TestOutputModeOnBuild:
+				oktetoLog.Spinner("Running tests...")
 			}
+
 			for _, log := range v.logs {
 				var text oktetoLog.JSONLogFormat
 				if err := json.Unmarshal([]byte(log), &text); err != nil {
-					oktetoLog.Infof("could not parse %s: %w", log, err)
+					oktetoLog.Infof("could not parse %s: %s", log, err)
+					continue
+				}
+				if text.Stage == "" {
+					oktetoLog.Infof("received log without stage: %s", text.Message)
 					continue
 				}
 				oktetoLog.SetStage(text.Stage)
@@ -170,19 +184,22 @@ func (t *trace) display(progress string) {
 					continue
 				case "Load manifest":
 					if text.Level == "error" {
-						oktetoLog.Fail(text.Message)
+						oktetoLog.Fail("%s", text.Message)
 					}
 				default:
 					// Print the information message about the stage if needed
 					if _, ok := t.stages[text.Stage]; !ok {
-						oktetoLog.Information("Running stage '%s'", text.Stage)
+						if progress != TestOutputModeOnBuild {
+							oktetoLog.Information("Running stage '%s'", text.Stage)
+						}
 						t.stages[text.Stage] = true
 					}
 					if text.Level == "error" {
 						if text.Stage != "" {
-							t.err = OktetoCommandErr{
-								Stage: text.Stage,
-								Err:   fmt.Errorf(text.Message),
+							t.err = buildkit.CommandErr{
+								Stage:  text.Stage,
+								Err:    fmt.Errorf("%s", text.Message),
+								Output: progress,
 							}
 						}
 					} else {
@@ -210,6 +227,16 @@ func (t trace) hasCommandLogs(v *vertexInfo) bool {
 func (t *trace) removeCompletedSteps() {
 	for k, v := range t.ongoing {
 		if v.completed {
+			// We need to specify the command test in order to not affect okteto deploy on remote
+			if strings.Contains(v.name, "remote-run test") && v.cached {
+				match := nameRegex.FindStringSubmatch(v.name)
+				if len(match) > 1 {
+					name := match[1]
+					oktetoLog.Information("Skipping test container '%s', CACHED", name)
+				} else {
+					oktetoLog.Information("Skipping test container, CACHED")
+				}
+			}
 			delete(t.ongoing, k)
 		}
 	}
@@ -217,8 +244,9 @@ func (t *trace) removeCompletedSteps() {
 
 type vertexInfo struct {
 	name                     string
+	logs                     []string
 	currentTransferedContext int64
 	totalTransferedContext   int64
 	completed                bool
-	logs                     []string
+	cached                   bool
 }

@@ -33,16 +33,18 @@ import (
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/k8s/configmaps"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
-	"github.com/okteto/okteto/pkg/model"
+	modelUtils "github.com/okteto/okteto/pkg/model/utils"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/repository"
 	"github.com/okteto/okteto/pkg/types"
+	"github.com/okteto/okteto/pkg/validator"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/api/core/v1"
 )
 
 const (
 	dependencyEnvTemplate = "OKTETO_DEPENDENCY_%s_VARIABLE_%s"
+	fiveMinutes           = 5 * time.Minute
 )
 
 var (
@@ -54,17 +56,15 @@ type deployFlags struct {
 	branch       string
 	repository   string
 	name         string
+	k8sContext   string
 	namespace    string
-	wait         bool
-	skipIfExists bool
-	timeout      time.Duration
 	file         string
 	variables    []string
 	labels       []string
+	timeout      time.Duration
+	wait         bool
+	skipIfExists bool
 	reuseParams  bool
-
-	// Deprecated fields
-	filename string
 }
 
 // DeployOptions represents options for deploy pipeline command
@@ -73,12 +73,12 @@ type DeployOptions struct {
 	Repository   string
 	Name         string
 	Namespace    string
-	Wait         bool
-	SkipIfExists bool
-	Timeout      time.Duration
 	File         string
 	Variables    []string
 	Labels       []string
+	Timeout      time.Duration
+	Wait         bool
+	SkipIfExists bool
 	ReuseParams  bool
 }
 
@@ -86,16 +86,19 @@ func deploy(ctx context.Context) *cobra.Command {
 	flags := &deployFlags{}
 	cmd := &cobra.Command{
 		Use:   "deploy",
-		Short: "Deploy an okteto pipeline",
-		Args:  utils.NoArgsAccepted("https://www.okteto.com/docs/reference/cli/#deploy-1"),
+		Short: "Runs a job in the cluster that clones a repository and executes okteto deploy on it",
+		Args:  utils.NoArgsAccepted("https://www.okteto.com/docs/reference/okteto-cli/#deploy-1"),
+		Example: `To run the deploy without the Okteto CLI wait for its completion, use the '--wait=false' flag:
+okteto pipeline deploy --wait=false`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctxResource := &model.ContextResource{}
-			if err := ctxResource.UpdateNamespace(flags.namespace); err != nil {
+
+			if err := validator.CheckReservedVariablesNameOption(flags.variables); err != nil {
 				return err
 			}
 
-			ctxOptions := &contextCMD.ContextOptions{
-				Namespace: ctxResource.Namespace,
+			ctxOptions := &contextCMD.Options{
+				Namespace: flags.namespace,
+				Context:   flags.k8sContext,
 				Show:      true,
 			}
 			if err := contextCMD.NewContextCommand().Run(ctx, ctxOptions); err != nil {
@@ -119,35 +122,31 @@ func deploy(ctx context.Context) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&flags.name, "name", "p", "", "name of the pipeline (defaults to the git config name)")
-	cmd.Flags().StringVarP(&flags.namespace, "namespace", "n", "", "namespace where the pipeline is deployed (defaults to the current namespace)")
-	cmd.Flags().StringVarP(&flags.repository, "repository", "r", "", "the repository to deploy (defaults to the current repository)")
-	cmd.Flags().StringVarP(&flags.branch, "branch", "b", "", "the branch to deploy (defaults to the current branch)")
-	cmd.Flags().BoolVarP(&flags.wait, "wait", "w", false, "wait until the pipeline finishes (defaults to false)")
-	cmd.Flags().BoolVarP(&flags.skipIfExists, "skip-if-exists", "", false, "skip the pipeline deployment if the pipeline already exists in the namespace (defaults to false)")
-	cmd.Flags().DurationVarP(&flags.timeout, "timeout", "t", (5 * time.Minute), "the length of time to wait for completion, zero means never. Any other values should contain a corresponding time unit e.g. 1s, 2m, 3h ")
-	cmd.Flags().StringArrayVarP(&flags.variables, "var", "v", []string{}, "set a pipeline variable (can be set more than once)")
-	cmd.Flags().StringVarP(&flags.file, "file", "f", "", "relative path within the repository to the manifest file (default to okteto-pipeline.yaml or .okteto/okteto-pipeline.yaml)")
-	cmd.Flags().StringVarP(&flags.filename, "filename", "", "", "relative path within the repository to the manifest file (default to okteto-pipeline.yaml or .okteto/okteto-pipeline.yaml)")
-	if err := cmd.Flags().MarkHidden("filename"); err != nil {
-		oktetoLog.Infof("failed to mark 'filename' flag as hidden: %s", err)
-	}
-	cmd.Flags().StringArrayVarP(&flags.labels, "label", "", []string{}, "set an environment label (can be set more than once)")
-	cmd.Flags().BoolVar(&flags.reuseParams, "reuse-params", false, "if pipeline exist, reuse same params to redeploy")
+	cmd.Flags().StringVarP(&flags.name, "name", "p", "", "the name of the Development Environment")
+	cmd.Flags().StringVarP(&flags.k8sContext, "context", "c", "", "overwrite the current Okteto Context")
+	cmd.Flags().StringVarP(&flags.namespace, "namespace", "n", "", "overwrite the current Okteto Namespace")
+	cmd.Flags().StringVarP(&flags.repository, "repository", "r", "", "the repository to deploy (defaults to your current repository)")
+	cmd.Flags().StringVarP(&flags.branch, "branch", "b", "", "the branch to deploy (defaults to your current branch)")
+	cmd.Flags().BoolVarP(&flags.wait, "wait", "w", true, "wait until the deployment finishes")
+	cmd.Flags().BoolVarP(&flags.skipIfExists, "skip-if-exists", "", false, "skip the deployment if the Development Environment already exists")
+	cmd.Flags().DurationVarP(&flags.timeout, "timeout", "t", fiveMinutes, "the length of time to wait for the deployment, zero means never. Any other values should contain a corresponding time unit e.g. 1s, 2m, 3h")
+	cmd.Flags().StringArrayVarP(&flags.variables, "var", "v", []string{}, "set a variable to be injected in the deploy commands (can be set more than once)")
+	cmd.Flags().StringVarP(&flags.file, "file", "f", "", "the path to the Okteto Manifest")
+	cmd.Flags().StringArrayVarP(&flags.labels, "label", "", []string{}, "tag and organize Development Environments using labels (multiple --label flags accepted)")
+	cmd.Flags().BoolVar(&flags.reuseParams, "reuse-params", false, "if the Development Environment exists, reuse same parameters to redeploy")
 
 	return cmd
 }
 
 // ExecuteDeployPipeline executes deploy pipeline given a set of options
 func (pc *Command) ExecuteDeployPipeline(ctx context.Context, opts *DeployOptions) error {
-
 	if err := opts.setDefaults(); err != nil {
 		return fmt.Errorf("could not set default values for options: %w", err)
 	}
 
-	c, _, err := pc.k8sClientProvider.Provide(okteto.Context().Cfg)
+	c, _, err := pc.k8sClientProvider.Provide(okteto.GetContext().Cfg)
 	if err != nil {
-		return fmt.Errorf("failed to load okteto context '%s': %v", okteto.Context().Name, err)
+		return fmt.Errorf("failed to load okteto context '%s': %w", okteto.GetContext().Name, err)
 	}
 
 	exists := false
@@ -261,7 +260,8 @@ func setEnvsFromDependency(cmap *v1.ConfigMap, envSetter envSetter) error {
 		return nil
 	}
 
-	name := cmap.Name
+	name := strings.TrimPrefix(cmap.Name, pipeline.ConfigmapNamePrefix)
+	sanitizedName := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 
 	decodedEnvs, err := base64.StdEncoding.DecodeString(dependencyEnvsEncoded)
 	if err != nil {
@@ -272,7 +272,7 @@ func setEnvsFromDependency(cmap *v1.ConfigMap, envSetter envSetter) error {
 		return err
 	}
 	for envKey, envValue := range envsToSet {
-		envName := fmt.Sprintf(dependencyEnvTemplate, strings.ToUpper(name), envKey)
+		envName := fmt.Sprintf(dependencyEnvTemplate, strings.ToUpper(sanitizedName), envKey)
 		if err := envSetter(envName, envValue); err != nil {
 			return err
 		}
@@ -425,15 +425,6 @@ func CheckAllResourcesRunning(name string, resourceStatus map[string]string) (bo
 }
 
 func (f deployFlags) toOptions() *DeployOptions {
-	file := f.file
-	if f.filename != "" {
-		oktetoLog.Warning("the 'filename' flag is deprecated and will be removed in a future version. Please consider using 'file' flag")
-		if file == "" {
-			file = f.filename
-		} else {
-			oktetoLog.Warning("flags 'filename' and 'file' can not be used at the same time. 'file' flag will take precedence")
-		}
-	}
 	return &DeployOptions{
 		Branch:       f.branch,
 		Repository:   f.repository,
@@ -442,7 +433,7 @@ func (f deployFlags) toOptions() *DeployOptions {
 		Wait:         f.wait,
 		SkipIfExists: f.skipIfExists,
 		Timeout:      f.timeout,
-		File:         file,
+		File:         f.file,
 		Variables:    f.variables,
 		Labels:       f.labels,
 		ReuseParams:  f.reuseParams,
@@ -458,7 +449,7 @@ func (o *DeployOptions) setDefaults() error {
 	if o.Repository == "" {
 		oktetoLog.Info("inferring git repository URL")
 
-		o.Repository, err = model.GetRepositoryURL(cwd)
+		o.Repository, err = modelUtils.GetRepositoryURL(cwd)
 		if err != nil {
 			return fmt.Errorf("could not get repository url: %w", err)
 		}
@@ -467,15 +458,15 @@ func (o *DeployOptions) setDefaults() error {
 	if o.Name == "" {
 
 		// in case of inferring the name, o.Name is not sanitized
-		c, _, err := okteto.NewK8sClientProvider().Provide(okteto.Context().Cfg)
+		c, _, err := okteto.NewK8sClientProvider().Provide(okteto.GetContext().Cfg)
 		if err != nil {
 			return err
 		}
 		inferer := devenvironment.NewNameInferer(c)
-		o.Name = inferer.InferNameFromDevEnvsAndRepository(context.Background(), o.Repository, okteto.Context().Namespace, o.File, "")
+		o.Name = inferer.InferNameFromDevEnvsAndRepository(context.Background(), o.Repository, okteto.GetContext().Namespace, o.File, "")
 	}
 
-	currentRepoURL, err := model.GetRepositoryURL(cwd)
+	currentRepoURL, err := modelUtils.GetRepositoryURL(cwd)
 	if err != nil {
 		oktetoLog.Debug("cwd does not have .git folder")
 	}
@@ -495,7 +486,7 @@ func (o *DeployOptions) setDefaults() error {
 	}
 
 	if o.Namespace == "" {
-		o.Namespace = okteto.Context().Namespace
+		o.Namespace = okteto.GetContext().Namespace
 	}
 	return nil
 }
@@ -503,8 +494,9 @@ func (o *DeployOptions) setDefaults() error {
 func (o *DeployOptions) toPipelineDeployClientOptions() (types.PipelineDeployOptions, error) {
 	var varList []types.Variable
 	for _, v := range o.Variables {
-		kv := strings.SplitN(v, "=", 2)
-		if len(kv) != 2 {
+		variableFormatParts := 2
+		kv := strings.SplitN(v, "=", variableFormatParts)
+		if len(kv) != variableFormatParts {
 			return types.PipelineDeployOptions{}, fmt.Errorf("invalid variable value '%s': must follow KEY=VALUE format", v)
 		}
 		varList = append(varList, types.Variable{

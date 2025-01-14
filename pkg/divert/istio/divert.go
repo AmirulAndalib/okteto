@@ -31,13 +31,13 @@ const (
 	UPDATE_CONFLICT_RETRIES = 20
 )
 
-// Driver weaver struct for the divert driver
+// Driver istio struct for the divert driver
 type Driver struct {
+	client      kubernetes.Interface
+	istioClient istioclientset.Interface
 	name        string
 	namespace   string
 	divert      model.DivertDeploy
-	client      kubernetes.Interface
-	istioClient istioclientset.Interface
 }
 
 // DivertTransformation represents the annotation for the okteto mutation webhook to divert a virtual service
@@ -46,11 +46,11 @@ type DivertTransformation struct {
 	Routes    []string `json:"routes,omitempty"`
 }
 
-func New(m *model.Manifest, c kubernetes.Interface, ic istioclientset.Interface) *Driver {
+func New(divert *model.DivertDeploy, name, namespace string, c kubernetes.Interface, ic istioclientset.Interface) *Driver {
 	return &Driver{
-		name:        m.Name,
-		namespace:   m.Namespace,
-		divert:      *m.Deploy.Divert,
+		name:        name,
+		namespace:   namespace,
+		divert:      *divert,
 		client:      c,
 		istioClient: ic,
 	}

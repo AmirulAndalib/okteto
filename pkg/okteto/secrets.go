@@ -19,14 +19,15 @@ import (
 	"fmt"
 	"strings"
 
+	dockertypes "github.com/docker/cli/cli/config/types"
+	dockercredentials "github.com/docker/docker-credential-helpers/credentials"
+	"github.com/okteto/okteto/pkg/config"
 	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/env"
 	"github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/types"
 	"github.com/shurcooL/graphql"
 	"gopkg.in/yaml.v3"
-
-	dockertypes "github.com/docker/cli/cli/config/types"
-	dockercredentials "github.com/docker/docker-credential-helpers/credentials"
 )
 
 type userClient struct {
@@ -38,27 +39,25 @@ func newUserClient(client graphqlClientInterface) *userClient {
 }
 
 type getContextQuery struct {
-	User    userQuery     `graphql:"user"`
-	Secrets []secretQuery `graphql:"getGitDeploySecrets"`
-	Cred    credQuery     `graphql:"credentials(space: $cred)"`
+	Cred              credQuery        `graphql:"credentials(space: $cred)"`
+	User              userQuery        `graphql:"user"`
+	PlatformVariables []variablesQuery `graphql:"getGitDeploySecrets"`
 }
 
-type getSecretsQuery struct {
-	Secrets []secretQuery `graphql:"getGitDeploySecrets"`
+type getVariablesQuery struct {
+	Variables []variablesQuery `graphql:"getGitDeploySecrets"`
 }
 
 type getContextFileQuery struct {
 	ContextFileJSON string `graphql:"contextFile"`
 }
 
-type getDeprecatedContextQuery struct {
-	User    deprecatedUserQuery `graphql:"user"`
-	Secrets []secretQuery       `graphql:"getGitDeploySecrets"`
-	Cred    credQuery           `graphql:"credentials(space: $cred)"`
-}
-
 type getRegistryCredentialsQuery struct {
 	RegistryCredentials registryCredsQuery `graphql:"registryCredentials(registryUrl: $regHost)"`
+}
+
+type getExecutionEnvQuery struct {
+	ExecutionEnv []variablesQuery `graphql:"executionEnv"`
 }
 
 type userQuery struct {
@@ -68,31 +67,12 @@ type userQuery struct {
 	Email           graphql.String
 	ExternalID      graphql.String `graphql:"externalID"`
 	Token           graphql.String
-	New             graphql.Boolean
 	Registry        graphql.String
 	Buildkit        graphql.String
 	Certificate     graphql.String
-	GlobalNamespace graphql.String  `graphql:"globalNamespace"`
+	GlobalNamespace graphql.String `graphql:"globalNamespace"`
+	New             graphql.Boolean
 	Analytics       graphql.Boolean `graphql:"telemetryEnabled"`
-}
-
-// TODO: Remove this code when users are in okteto chart > 0.10.8
-type deprecatedUserQuery struct {
-	Id          graphql.String
-	Name        graphql.String
-	Namespace   graphql.String
-	Email       graphql.String
-	ExternalID  graphql.String `graphql:"externalID"`
-	Token       graphql.String
-	New         graphql.Boolean
-	Registry    graphql.String
-	Buildkit    graphql.String
-	Certificate graphql.String
-}
-
-type secretQuery struct {
-	Name  graphql.String
-	Value graphql.String
 }
 
 type credQuery struct {
@@ -115,6 +95,11 @@ type metadataQuery struct {
 	Metadata []metadataQueryItem `graphql:"metadata(namespace: $namespace)"`
 }
 
+type variablesQuery struct {
+	Name  graphql.String
+	Value graphql.String
+}
+
 type metadataQueryItem struct {
 	Name  graphql.String
 	Value graphql.String
@@ -126,7 +111,7 @@ type contextFileJSON struct {
 	} `yaml:"contexts"`
 }
 
-// GetSecrets returns the secrets from Okteto API
+// GetContext returns the user context from Okteto API
 func (c *userClient) GetContext(ctx context.Context, ns string) (*types.UserContext, error) {
 	var queryStruct getContextQuery
 	variables := map[string]interface{}{
@@ -134,21 +119,15 @@ func (c *userClient) GetContext(ctx context.Context, ns string) (*types.UserCont
 	}
 	err := query(ctx, &queryStruct, variables, c.client)
 	if err != nil {
-		if strings.Contains(err.Error(), "Cannot query field \"globalNamespace\" on type \"me\"") {
-			return c.deprecatedGetUserContext(ctx)
-		}
-		if strings.Contains(err.Error(), "Cannot query field \"telemetryEnabled\" on type \"me\"") {
-			return c.deprecatedGetUserContext(ctx)
-		}
 		return nil, err
 	}
 
-	secrets := make([]types.Secret, 0)
-	for _, secret := range queryStruct.Secrets {
-		if !strings.Contains(string(secret.Name), ".") {
-			secrets = append(secrets, types.Secret{
-				Name:  string(secret.Name),
-				Value: string(secret.Value),
+	platformVars := make([]env.Var, 0)
+	for _, v := range queryStruct.PlatformVariables {
+		if !strings.Contains(string(v.Name), ".") {
+			platformVars = append(platformVars, env.Var{
+				Name:  string(v.Name),
+				Value: string(v.Value),
 			})
 		}
 	}
@@ -171,7 +150,7 @@ func (c *userClient) GetContext(ctx context.Context, ns string) (*types.UserCont
 			GlobalNamespace: globalNamespace,
 			Analytics:       analytics,
 		},
-		Secrets: secrets,
+		PlatformVariables: platformVars,
 		Credentials: types.Credential{
 			Server:      string(queryStruct.Cred.Server),
 			Certificate: string(queryStruct.Cred.Certificate),
@@ -182,71 +161,25 @@ func (c *userClient) GetContext(ctx context.Context, ns string) (*types.UserCont
 	return result, nil
 }
 
-// GetSecrets returns the secrets from Okteto API
-func (c *userClient) GetUserSecrets(ctx context.Context) ([]types.Secret, error) {
-	var queryStruct getSecretsQuery
+// GetOktetoPlatformVariables returns the user and cluster variables from Okteto API
+func (c *userClient) GetOktetoPlatformVariables(ctx context.Context) ([]env.Var, error) {
+	var queryStruct getVariablesQuery
 	err := query(ctx, &queryStruct, nil, c.client)
 	if err != nil {
 		return nil, err
 	}
 
-	secrets := make([]types.Secret, 0)
-	for _, secret := range queryStruct.Secrets {
-		if !strings.Contains(string(secret.Name), ".") {
-			secrets = append(secrets, types.Secret{
-				Name:  string(secret.Name),
-				Value: string(secret.Value),
+	vars := make([]env.Var, 0)
+	for _, v := range queryStruct.Variables {
+		if !strings.Contains(string(v.Name), ".") {
+			vars = append(vars, env.Var{
+				Name:  string(v.Name),
+				Value: string(v.Value),
 			})
 		}
 	}
 
-	return secrets, nil
-}
-
-// TODO: Remove this code when users are in okteto chart > 0.10.8
-func (c *userClient) deprecatedGetUserContext(ctx context.Context) (*types.UserContext, error) {
-	var queryStruct getDeprecatedContextQuery
-	variables := map[string]interface{}{
-		"cred": graphql.String(""),
-	}
-	err := query(ctx, &queryStruct, variables, c.client)
-	if err != nil {
-		return nil, err
-	}
-
-	secrets := make([]types.Secret, 0)
-	for _, secret := range queryStruct.Secrets {
-		if !strings.Contains(string(secret.Name), ".") {
-			secrets = append(secrets, types.Secret{
-				Name:  string(secret.Name),
-				Value: string(secret.Value),
-			})
-		}
-	}
-	result := &types.UserContext{
-		User: types.User{
-			ID:              string(queryStruct.User.Id),
-			Name:            string(queryStruct.User.Name),
-			Namespace:       string(queryStruct.User.Namespace),
-			Email:           string(queryStruct.User.Email),
-			ExternalID:      string(queryStruct.User.ExternalID),
-			Token:           string(queryStruct.User.Token),
-			New:             bool(queryStruct.User.New),
-			Registry:        string(queryStruct.User.Registry),
-			Buildkit:        string(queryStruct.User.Buildkit),
-			Certificate:     string(queryStruct.User.Certificate),
-			GlobalNamespace: constants.DefaultGlobalNamespace,
-			Analytics:       true,
-		},
-		Secrets: secrets,
-		Credentials: types.Credential{
-			Server:      string(queryStruct.Cred.Server),
-			Certificate: string(queryStruct.Cred.Certificate),
-			Token:       string(queryStruct.Cred.Token),
-			Namespace:   string(queryStruct.Cred.Namespace),
-		},
-	}
-	return result, nil
+	return vars, nil
 }
 
 func (c *userClient) GetClusterCertificate(ctx context.Context, cluster, ns string) ([]byte, error) {
@@ -267,15 +200,15 @@ func (c *userClient) GetClusterCertificate(ctx context.Context, cluster, ns stri
 
 	conf, ok := file.Contexts[cluster]
 	if !ok {
-		return nil, fmt.Errorf("cluster-not-found")
+		return nil, fmt.Errorf("context-not-found")
 	}
 	if conf.Certificate == "" {
-		return nil, fmt.Errorf("cluster has no certificate")
+		return nil, fmt.Errorf("context has no certificate")
 	}
 
 	b, err := base64.StdEncoding.DecodeString(conf.Certificate)
 	if err != nil {
-		return nil, fmt.Errorf("failed to base64 decode cluster certificate: %w", err)
+		return nil, fmt.Errorf("failed to base64 decode context certificate: %w", err)
 	}
 
 	return b, nil
@@ -318,6 +251,30 @@ func (c *userClient) GetClusterMetadata(ctx context.Context, ns string) (types.C
 			metadata.ServerName = string(v.Value)
 		case "pipelineRunnerImage":
 			metadata.PipelineRunnerImage = string(v.Value)
+		case "cliImage":
+			metadata.CliImage = string(v.Value)
+			config.ClusterCliRepository, err = getRegistryAndRepositoryFromImage(string(v.Value))
+			if err != nil {
+				return metadata, err
+			}
+		case "isTrial":
+			metadata.IsTrialLicense = string(v.Value) == "true"
+		case "companyName":
+			metadata.CompanyName = string(v.Value)
+		case "buildkitInternalIP":
+			metadata.BuildKitInternalIP = string(v.Value)
+		case "publicDomain":
+			metadata.PublicDomain = string(v.Value)
+		case "sshAgentInternalIP":
+			metadata.SSHAgentInternalIP = string(v.Value)
+		case "sshAgentHostname":
+			metadata.SSHAgentHostname = string(v.Value)
+		case "sshAgentPort":
+			metadata.SSHAgentPort = string(v.Value)
+		case "cliMinVersion":
+			metadata.CliMinVersion = string(v.Value)
+		case "cliClusterVersion":
+			metadata.CliClusterVersion = string(v.Value)
 		}
 	}
 	if metadata.PipelineRunnerImage == "" {
@@ -351,4 +308,84 @@ func (c *userClient) GetRegistryCredentials(ctx context.Context, host string) (d
 		IdentityToken: string(queryStruct.RegistryCredentials.Identitytoken),
 	}, nil
 
+}
+
+func (c *userClient) GetExecutionEnv(ctx context.Context) (map[string]string, error) {
+	result := make(map[string]string)
+
+	var queryStruct getExecutionEnvQuery
+	err := query(ctx, &queryStruct, nil, c.client)
+	if err != nil {
+		if strings.Contains(err.Error(), "Cannot query field \"executionEnv\" on type \"Query\"") {
+			return result, nil
+		}
+		return result, err
+	}
+
+	for _, envVar := range queryStruct.ExecutionEnv {
+		result[string(envVar.Name)] = string(envVar.Value)
+	}
+	return result, nil
+}
+
+// getRegistryAndRepositoryFromImage returns the registry and repository from an image name
+// Valid image names are:
+// - registry/repository:tag
+// - registry/repository@digest
+// - repository:tag
+// - repository@digest
+func getRegistryAndRepositoryFromImage(image string) (string, error) {
+	// Check for multiple '@' symbols which indicate an invalid image name
+	if strings.Count(image, "@") > 1 {
+		return "", fmt.Errorf("invalid image name, multiple '@'")
+	}
+
+	imageWithDigestParts := 2
+	// Remove any digest (part after '@')
+	imageNoDigest := strings.SplitN(image, "@", imageWithDigestParts)[0]
+
+	// Split the image into components separated by '/'
+	parts := strings.Split(imageNoDigest, "/")
+
+	var rest []string
+	var domain string
+
+	// Determine if a registry is specified
+	if len(parts) == 1 || (len(parts) >= 2 && !strings.ContainsAny(parts[0], ".:") && parts[0] != "localhost") {
+		// No registry specified, default to docker.io
+		domain = "docker.io"
+		rest = parts
+	} else {
+		domain = parts[0]
+		rest = parts[1:]
+	}
+
+	// Reconstruct the repository path
+	repositoryPath := strings.Join(rest, "/")
+
+	// Remove any tag (part after the last ':') from the last component
+	repoParts := strings.Split(repositoryPath, "/")
+	lastPart := repoParts[len(repoParts)-1]
+
+	if strings.Count(lastPart, ":") > 1 {
+		return "", fmt.Errorf("invalid repository name, multiple ':' in the last component")
+	}
+
+	if colonIndex := strings.LastIndex(lastPart, ":"); colonIndex != -1 {
+		// Remove the tag
+		lastPart = lastPart[:colonIndex]
+		repoParts[len(repoParts)-1] = lastPart
+	}
+
+	repositoryPath = strings.Join(repoParts, "/")
+
+	// Handle official images by adding 'library/' if no namespace is specified
+	if domain == "docker.io" && !strings.Contains(repositoryPath, "/") {
+		repositoryPath = "library/" + repositoryPath
+	}
+
+	// Combine domain and repositoryPath
+	fullImage := domain + "/" + repositoryPath
+
+	return fullImage, nil
 }

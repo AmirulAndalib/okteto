@@ -21,24 +21,20 @@ const malformedGlobalForward = "Wrong global forward syntax '%s', must be of the
 
 // GlobalForward forwards represents a port forwarding definition
 type GlobalForward struct {
+	Labels      map[string]string `json:"labels" yaml:"labels"`
+	ServiceName string            `json:"name" yaml:"name"`
 	Local       int               `json:"localPort" yaml:"localPort"`
 	Remote      int               `json:"remotePort" yaml:"remotePort"`
-	ServiceName string            `json:"name" yaml:"name"`
-	Labels      map[string]string `json:"labels" yaml:"labels"`
 	IsAdded     bool              `json:"-" yaml:"-"`
 }
 
 type GlobalForwardRaw struct {
+	Labels      map[string]string `json:"labels" yaml:"labels"`
+	ServiceName string            `json:"name" yaml:"name"`
 	Local       int               `json:"localPort" yaml:"localPort"`
 	Remote      int               `json:"remotePort" yaml:"remotePort"`
-	ServiceName string            `json:"name" yaml:"name"`
-	Labels      map[string]string `json:"labels" yaml:"labels"`
 }
 
 func (gf GlobalForward) String() string {
 	return fmt.Sprintf("%d:%s:%d", gf.Local, gf.ServiceName, gf.Remote)
-}
-
-func (gf *GlobalForward) less(c *GlobalForward) bool {
-	return gf.Local < c.Local
 }

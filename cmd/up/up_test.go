@@ -22,6 +22,7 @@ import (
 	"github.com/okteto/okteto/internal/test"
 	"github.com/okteto/okteto/internal/test/client"
 	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/env"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/model/forward"
@@ -38,7 +39,7 @@ import (
 
 func Test_waitUntilExitOrInterrupt(t *testing.T) {
 	up := upContext{
-		Options:           &UpOptions{},
+		Options:           &Options{},
 		K8sClientProvider: test.NewFakeK8sProvider(),
 	}
 	up.CommandResult = make(chan error, 1)
@@ -68,15 +69,14 @@ func Test_waitUntilExitOrInterrupt(t *testing.T) {
 
 func Test_printDisplayContext(t *testing.T) {
 	var tests = []struct {
-		name string
 		up   *upContext
+		name string
 	}{
 		{
 			name: "basic",
 			up: &upContext{
 				Dev: &model.Dev{
-					Name:      "dev",
-					Namespace: "namespace",
+					Name: "dev",
 				},
 				Manifest: &model.Manifest{
 					GlobalForward: []forward.GlobalForward{},
@@ -87,9 +87,8 @@ func Test_printDisplayContext(t *testing.T) {
 			name: "single-forward",
 			up: &upContext{
 				Dev: &model.Dev{
-					Name:      "dev",
-					Namespace: "namespace",
-					Forward:   []forward.Forward{{Local: 1000, Remote: 1000}},
+					Name:    "dev",
+					Forward: []forward.Forward{{Local: 1000, Remote: 1000}},
 				},
 				Manifest: &model.Manifest{
 					GlobalForward: []forward.GlobalForward{},
@@ -100,9 +99,8 @@ func Test_printDisplayContext(t *testing.T) {
 			name: "multiple-forward",
 			up: &upContext{
 				Dev: &model.Dev{
-					Name:      "dev",
-					Namespace: "namespace",
-					Forward:   []forward.Forward{{Local: 1000, Remote: 1000}, {Local: 2000, Remote: 2000}},
+					Name:    "dev",
+					Forward: []forward.Forward{{Local: 1000, Remote: 1000}, {Local: 2000, Remote: 2000}},
 				},
 				Manifest: &model.Manifest{
 					GlobalForward: []forward.GlobalForward{
@@ -123,9 +121,8 @@ func Test_printDisplayContext(t *testing.T) {
 			name: "single-reverse",
 			up: &upContext{
 				Dev: &model.Dev{
-					Name:      "dev",
-					Namespace: "namespace",
-					Reverse:   []model.Reverse{{Local: 1000, Remote: 1000}},
+					Name:    "dev",
+					Reverse: []model.Reverse{{Local: 1000, Remote: 1000}},
 				},
 				Manifest: &model.Manifest{
 					GlobalForward: []forward.GlobalForward{},
@@ -136,9 +133,8 @@ func Test_printDisplayContext(t *testing.T) {
 			name: "multiple-reverse+global-forward",
 			up: &upContext{
 				Dev: &model.Dev{
-					Name:      "dev",
-					Namespace: "namespace",
-					Reverse:   []model.Reverse{{Local: 1000, Remote: 1000}, {Local: 2000, Remote: 2000}},
+					Name:    "dev",
+					Reverse: []model.Reverse{{Local: 1000, Remote: 1000}, {Local: 2000, Remote: 2000}},
 				},
 				Manifest: &model.Manifest{
 					GlobalForward: []forward.GlobalForward{
@@ -159,8 +155,7 @@ func Test_printDisplayContext(t *testing.T) {
 			name: "global-forward",
 			up: &upContext{
 				Dev: &model.Dev{
-					Name:      "dev",
-					Namespace: "namespace",
+					Name: "dev",
 				},
 				Manifest: &model.Manifest{
 					GlobalForward: []forward.GlobalForward{
@@ -177,8 +172,7 @@ func Test_printDisplayContext(t *testing.T) {
 			name: "multiple-global-forward",
 			up: &upContext{
 				Dev: &model.Dev{
-					Name:      "dev",
-					Namespace: "namespace",
+					Name: "dev",
 				},
 				Manifest: &model.Manifest{
 					GlobalForward: []forward.GlobalForward{
@@ -208,53 +202,53 @@ func Test_printDisplayContext(t *testing.T) {
 
 func TestEnvVarIsAddedProperlyToDevContainerWhenIsSetFromCmd(t *testing.T) {
 	var tests = []struct {
-		name                    string
 		dev                     *model.Dev
-		upOptions               *UpOptions
+		upOptions               *Options
+		name                    string
 		expectedNumManifestEnvs int
 	}{
 		{
 			name:                    "Add only env vars from cmd to dev container",
 			dev:                     &model.Dev{},
-			upOptions:               &UpOptions{Envs: []string{"VAR1=value1", "VAR2=value2"}},
+			upOptions:               &Options{Envs: []string{"VAR1=value1", "VAR2=value2"}},
 			expectedNumManifestEnvs: 2,
 		},
 		{
 			name:                    "Add only env vars from cmd to dev container using envsubst format",
 			dev:                     &model.Dev{},
-			upOptions:               &UpOptions{Envs: []string{"VAR1=value1", "VAR2=${var=$USER}"}},
+			upOptions:               &Options{Envs: []string{"VAR1=value1", "VAR2=${var=$USER}"}},
 			expectedNumManifestEnvs: 2,
 		},
 		{
 			name:                    "Add only env vars from cmd to dev container using non ascii characters",
 			dev:                     &model.Dev{},
-			upOptions:               &UpOptions{Envs: []string{"PASS=~$#@"}},
+			upOptions:               &Options{Envs: []string{"PASS=~$#@"}},
 			expectedNumManifestEnvs: 1,
 		},
 		{
 			name: "Add env vars from cmd and manifest to dev container",
 			dev: &model.Dev{
-				Environment: model.Environment{
+				Environment: env.Environment{
 					{
 						Name:  "VAR_FROM_MANIFEST",
 						Value: "value",
 					},
 				},
 			},
-			upOptions:               &UpOptions{Envs: []string{"VAR1=value1", "VAR2=value2"}},
+			upOptions:               &Options{Envs: []string{"VAR1=value1", "VAR2=value2"}},
 			expectedNumManifestEnvs: 3,
 		},
 		{
 			name: "Overwrite env vars when is required",
 			dev: &model.Dev{
-				Environment: model.Environment{
+				Environment: env.Environment{
 					{
 						Name:  "VAR_TO_OVERWRITE",
 						Value: "oldValue",
 					},
 				},
 			},
-			upOptions:               &UpOptions{Envs: []string{"VAR_TO_OVERWRITE=newValue", "VAR2=value2"}},
+			upOptions:               &Options{Envs: []string{"VAR_TO_OVERWRITE=newValue", "VAR2=value2"}},
 			expectedNumManifestEnvs: 2,
 		},
 	}
@@ -275,39 +269,39 @@ func TestEnvVarIsAddedProperlyToDevContainerWhenIsSetFromCmd(t *testing.T) {
 
 func TestEnvVarIsNotAddedWhenHasBuiltInOktetoEnvVarsFormat(t *testing.T) {
 	var tests = []struct {
-		name                    string
 		dev                     *model.Dev
-		upOptions               *UpOptions
+		upOptions               *Options
+		name                    string
 		expectedNumManifestEnvs int
 	}{
 		{
 			name:                    "Unable to set built-in okteto environment variable OKTETO_NAMESPACE",
 			dev:                     &model.Dev{},
-			upOptions:               &UpOptions{Envs: []string{"OKTETO_NAMESPACE=value"}},
+			upOptions:               &Options{Envs: []string{"OKTETO_NAMESPACE=value"}},
 			expectedNumManifestEnvs: 2,
 		},
 		{
 			name:                    "Unable to set built-in okteto environment variable OKTETO_GIT_BRANCH",
 			dev:                     &model.Dev{},
-			upOptions:               &UpOptions{Envs: []string{"OKTETO_GIT_BRANCH=value"}},
+			upOptions:               &Options{Envs: []string{"OKTETO_GIT_BRANCH=value"}},
 			expectedNumManifestEnvs: 2,
 		},
 		{
 			name:                    "Unable to set built-in okteto environment variable OKTETO_GIT_COMMIT",
 			dev:                     &model.Dev{},
-			upOptions:               &UpOptions{Envs: []string{"OKTETO_GIT_COMMIT=value"}},
+			upOptions:               &Options{Envs: []string{"OKTETO_GIT_COMMIT=value"}},
 			expectedNumManifestEnvs: 2,
 		},
 		{
 			name:                    "Unable to set built-in okteto environment variable OKTETO_REGISTRY_URL",
 			dev:                     &model.Dev{},
-			upOptions:               &UpOptions{Envs: []string{"OKTETO_REGISTRY_URL=value"}},
+			upOptions:               &Options{Envs: []string{"OKTETO_REGISTRY_URL=value"}},
 			expectedNumManifestEnvs: 2,
 		},
 		{
 			name:                    "Unable to set built-in okteto environment variable BUILDKIT_HOST",
 			dev:                     &model.Dev{},
-			upOptions:               &UpOptions{Envs: []string{"BUILDKIT_HOST=value"}},
+			upOptions:               &Options{Envs: []string{"BUILDKIT_HOST=value"}},
 			expectedNumManifestEnvs: 2,
 		},
 	}
@@ -317,44 +311,6 @@ func TestEnvVarIsNotAddedWhenHasBuiltInOktetoEnvVarsFormat(t *testing.T) {
 			if !errors.Is(err, oktetoErrors.ErrBuiltInOktetoEnvVarSetFromCMD) {
 				t.Fatalf("expected error in setEnvVarsFromCmd: %s due to try to set a built-in okteto environment variable", err)
 			}
-		})
-	}
-}
-
-func TestCommandAddedToUpOptionsWhenPassedAsFlag(t *testing.T) {
-	var tests = []struct {
-		name            string
-		command         []string
-		expectedCommand []string
-	}{
-		{
-			name:            "Passing no commands",
-			command:         []string{""},
-			expectedCommand: []string{},
-		},
-		{
-			name:            "Passing commands",
-			command:         []string{"echo", "hello"},
-			expectedCommand: []string{"echo", "hello"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-
-			cmd := Up()
-			for _, val := range tt.command {
-				err := cmd.Flags().Set("command", val)
-				if err != nil {
-					t.Fatalf("unexpected error in Set: %s", err)
-				}
-			}
-
-			flagValue, err := cmd.Flags().GetStringArray("command")
-			if err != nil {
-				t.Fatalf("unexpected error in GetStringArray: %s", err)
-			}
-
-			assert.Equal(t, tt.expectedCommand, flagValue)
 		})
 	}
 }
@@ -411,11 +367,11 @@ func TestWakeNamespaceIfAppliesWithoutErrors(t *testing.T) {
 func TestSetSyncDefaultsByDevMode(t *testing.T) {
 	fakeSyncFolderName := "test"
 	tests := []struct {
-		name           string
+		expectedError  error
 		dev            *model.Dev
 		expectedDev    *model.Dev
+		name           string
 		syncFolderName string
-		expectedError  error
 	}{
 		{
 			name: "hybrid mode not enabled: return nil",
@@ -483,11 +439,11 @@ func TestSetSyncDefaultsByDevModeError(t *testing.T) {
 
 func TestUpdateKubetoken(t *testing.T) {
 	tt := []struct {
-		name        string
-		f           *client.FakeOktetoClient
-		context     *okteto.OktetoContextStore
-		expectedCfg *api.Config
 		expected    error
+		f           *client.FakeOktetoClient
+		context     *okteto.ContextStore
+		expectedCfg *api.Config
+		name        string
 	}{
 		{
 			name: "oktetoClientError",
@@ -503,9 +459,9 @@ func TestUpdateKubetoken(t *testing.T) {
 					},
 				}),
 			},
-			context: &okteto.OktetoContextStore{
+			context: &okteto.ContextStore{
 				CurrentContext: "test",
-				Contexts: map[string]*okteto.OktetoContext{
+				Contexts: map[string]*okteto.Context{
 					"test": {
 						UserID: "test",
 						Cfg: &api.Config{
@@ -536,9 +492,9 @@ func TestUpdateKubetoken(t *testing.T) {
 					},
 				}),
 			},
-			context: &okteto.OktetoContextStore{
+			context: &okteto.ContextStore{
 				CurrentContext: "test",
-				Contexts: map[string]*okteto.OktetoContext{
+				Contexts: map[string]*okteto.Context{
 					"test": {
 						UserID: "test",
 						Cfg: &api.Config{
@@ -571,9 +527,9 @@ func TestUpdateKubetoken(t *testing.T) {
 					},
 				}),
 			},
-			context: &okteto.OktetoContextStore{
+			context: &okteto.ContextStore{
 				CurrentContext: "123",
-				Contexts: map[string]*okteto.OktetoContext{
+				Contexts: map[string]*okteto.Context{
 					"test": {
 						UserID: "test",
 						Cfg: &api.Config{
@@ -605,9 +561,9 @@ func TestUpdateKubetoken(t *testing.T) {
 					},
 				}),
 			},
-			context: &okteto.OktetoContextStore{
+			context: &okteto.ContextStore{
 				CurrentContext: "test",
-				Contexts: map[string]*okteto.OktetoContext{
+				Contexts: map[string]*okteto.Context{
 					"test": {
 						UserID: "test",
 						Cfg: &api.Config{
@@ -639,6 +595,110 @@ func TestUpdateKubetoken(t *testing.T) {
 
 			resultCFG := okteto.CurrentStore.Contexts["test"].Cfg
 			assert.Equal(t, tt.expectedCfg, resultCFG)
+		})
+	}
+}
+
+type fakeBuilder struct {
+	getServicesErr   error
+	buildErr         error
+	usedBuildOptions *types.BuildOptions
+	services         []string
+}
+
+func (b *fakeBuilder) GetServicesToBuildDuringExecution(_ context.Context, _ *model.Manifest, _ []string) ([]string, error) {
+	if b.getServicesErr != nil {
+		return nil, b.getServicesErr
+	}
+	return b.services, nil
+}
+
+func (b *fakeBuilder) Build(_ context.Context, opts *types.BuildOptions) error {
+	b.usedBuildOptions = opts
+	if b.buildErr != nil {
+		return b.buildErr
+	}
+	return nil
+}
+
+func (*fakeBuilder) GetBuildEnvVars() map[string]string {
+	return nil
+}
+
+func Test_buildServicesAndSetBuildEnvs(t *testing.T) {
+	tests := []struct {
+		expectedErr       error
+		m                 *model.Manifest
+		builder           *fakeBuilder
+		expectedBuildOpts *types.BuildOptions
+		name              string
+	}{
+		{
+			name: "builder GetServicesToBuildDuringExecution returns error",
+			builder: &fakeBuilder{
+				getServicesErr: assert.AnError,
+			},
+			expectedErr: assert.AnError,
+		},
+		{
+			name: "builder GetServicesToBuildDuringExecution returns empty list",
+			builder: &fakeBuilder{
+				services: nil,
+			},
+		},
+		{
+			name: "builder GetServicesToBuildDuringExecution returns list, Build is called with the list and the input manifest",
+			builder: &fakeBuilder{
+				services: []string{"test", "okteto"},
+				usedBuildOptions: &types.BuildOptions{
+					CommandArgs: []string{"test", "okteto"},
+					Manifest: &model.Manifest{
+						Name: "test-okteto",
+					},
+				},
+			},
+			m: &model.Manifest{
+				Name: "test-okteto",
+			},
+			expectedBuildOpts: &types.BuildOptions{
+				CommandArgs: []string{"test", "okteto"},
+				Manifest: &model.Manifest{
+					Name: "test-okteto",
+				},
+			},
+		},
+		{
+			name: "builder GetServicesToBuildDuringExecution returns list, Build returns error",
+			builder: &fakeBuilder{
+				services: []string{"test", "okteto"},
+				usedBuildOptions: &types.BuildOptions{
+					CommandArgs: []string{"test", "okteto"},
+					Manifest: &model.Manifest{
+						Name: "test-okteto",
+					},
+				},
+				buildErr: assert.AnError,
+			},
+			m: &model.Manifest{
+				Name: "test-okteto",
+			},
+			expectedBuildOpts: &types.BuildOptions{
+				CommandArgs: []string{"test", "okteto"},
+				Manifest: &model.Manifest{
+					Name: "test-okteto",
+				},
+			},
+			expectedErr: assert.AnError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			got := buildServicesAndSetBuildEnvs(ctx, tt.m, tt.builder)
+
+			require.Equal(t, tt.expectedErr, got)
+			require.Equal(t, tt.expectedBuildOpts, tt.builder.usedBuildOptions)
 		})
 	}
 }

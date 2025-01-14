@@ -1,4 +1,4 @@
-// Copyright 2021 The Okteto Authors
+// Copyright 2024 The Okteto Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -56,7 +56,7 @@ func ListStatefulsets(ctx context.Context, name, ns string, c kubernetes.Interfa
 	return sfsList, nil
 }
 
-// HasDeployedSomething checks if the pipeline has deployed any deployment/statefulset/job
+// HasDeployedSomething checks if the pipeline has deployed any deployment/statefulset
 func HasDeployedSomething(ctx context.Context, name, ns string, c kubernetes.Interface) (bool, error) {
 	labels := fmt.Sprintf("%s=%s", model.DeployedByLabel, format.ResourceK8sMetaString(name))
 	dList, err := deployments.List(ctx, ns, labels, c)

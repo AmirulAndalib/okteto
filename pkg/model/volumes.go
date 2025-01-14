@@ -15,16 +15,20 @@ package model
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	apiv1 "k8s.io/api/core/v1"
 )
 
 const (
-	cloudDefaultVolumeSize = "2Gi"
-	defaultVolumeSize      = "5Gi"
+	defaultVolumeSize = "5Gi"
+
+	// devPersistentVolumeEnabledEnvVar is the name of the environment variable to change the defaultVolumeSize value
+	devPersistentVolumeSizeEnvVar = "OKTETO_DEV_PERSISTENT_VOLUME_SIZE"
 )
 
 func (dev *Dev) translateDeprecatedVolumeFields() error {
@@ -97,6 +101,7 @@ func (dev *Dev) IsSubPathFolder(path string) (bool, error) {
 	return false, oktetoErrors.ErrNotFound
 }
 
+// computeParentSyncFolder calculates the parent sync folder
 func (dev *Dev) computeParentSyncFolder() {
 	pathSplits := map[int]string{}
 	maxIndex := -1
@@ -166,37 +171,68 @@ func (dev *Dev) PersistentVolumeEnabled() bool {
 	return dev.PersistentVolumeInfo.Enabled
 }
 
-// PersistentVolumeSize returns the persistent volume size
+// PersistentVolumeAccessMode returns the persistent volume accessMode
+func (dev *Dev) PersistentVolumeAccessMode() apiv1.PersistentVolumeAccessMode {
+	if dev.PersistentVolumeInfo == nil {
+		return apiv1.ReadWriteOnce
+	}
+	if dev.PersistentVolumeInfo.AccessMode == "" {
+		return apiv1.ReadWriteOnce
+	}
+	return dev.PersistentVolumeInfo.AccessMode
+}
+
+// PersistentVolumeMode returns the persistent volume volumeMode
+func (dev *Dev) PersistentVolumeMode() apiv1.PersistentVolumeMode {
+	if dev.PersistentVolumeInfo == nil {
+		return apiv1.PersistentVolumeFilesystem
+	}
+	if dev.PersistentVolumeInfo.VolumeMode == "" {
+		return apiv1.PersistentVolumeFilesystem
+	}
+	return dev.PersistentVolumeInfo.VolumeMode
+}
+
+// PersistentVolumeAnnotations returns the persistent volume annotations
+func (dev *Dev) PersistentVolumeAnnotations() Annotations {
+	if dev.PersistentVolumeInfo == nil {
+		return nil
+	}
+	return dev.PersistentVolumeInfo.Annotations
+}
+
+// PersistentVolumeLabels returns the persistent volume labels
+func (dev *Dev) PersistentVolumeLabels() Labels {
+	if dev.PersistentVolumeInfo == nil {
+		return nil
+	}
+	return dev.PersistentVolumeInfo.Labels
+}
+
+// devPersistentVolumeSizeEnvValueOrDefault returns the value of the environment variable OKTETO_DEV_PERSISTENT_VOLUME_SIZE
+// if not set, it will return the default value at defaultVolumeSize local variable
+func devPersistentVolumeSizeEnvValueOrDefault() string {
+	if v, ok := os.LookupEnv(devPersistentVolumeSizeEnvVar); ok && v != "" {
+		return v
+	}
+	return defaultVolumeSize
+}
+
+// PersistentVolumeSize returns the persistent volume size set at the dev object
+// if not set, it will return the value of the environment variable OKTETO_DEV_PERSISTENT_VOLUME_SIZE
+// if the env is not set, the default value at defaultVolumeSize local variable
 func (dev *Dev) PersistentVolumeSize() string {
 	if dev.PersistentVolumeInfo == nil {
-		return dev.getDefaultPersistentVolumeSize()
+		return devPersistentVolumeSizeEnvValueOrDefault()
 	}
 	if dev.PersistentVolumeInfo.Size == "" {
-		return dev.getDefaultPersistentVolumeSize()
+		return devPersistentVolumeSizeEnvValueOrDefault()
 	}
 	return dev.PersistentVolumeInfo.Size
 }
 
-func (dev *Dev) isOktetoCloud() bool { // TODO: inject this
-	switch dev.Context {
-	case "https://cloud.okteto.com", "https://staging.okteto.dev":
-		return true
-	default:
-		return false
-	}
-}
-
-func (dev *Dev) getDefaultPersistentVolumeSize() string {
-	switch {
-	case dev.isOktetoCloud():
-		return cloudDefaultVolumeSize
-	default:
-		return defaultVolumeSize
-	}
-}
-
 func (dev *Dev) HasDefaultPersistentVolumeSize() bool {
-	return dev.PersistentVolumeSize() == dev.getDefaultPersistentVolumeSize()
+	return dev.PersistentVolumeSize() == defaultVolumeSize
 }
 
 // PersistentVolumeStorageClass returns the persistent volume storage class

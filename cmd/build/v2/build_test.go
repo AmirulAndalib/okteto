@@ -21,43 +21,49 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	v1 "github.com/okteto/okteto/cmd/build/v1"
+	"github.com/okteto/okteto/cmd/build/basic"
+	"github.com/okteto/okteto/cmd/build/v2/smartbuild"
 	"github.com/okteto/okteto/internal/test"
+	"github.com/okteto/okteto/pkg/build"
+	buildCmd "github.com/okteto/okteto/pkg/cmd/build"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/registry"
 	"github.com/okteto/okteto/pkg/types"
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var fakeManifest *model.Manifest = &model.Manifest{
 	Name: "test",
-	Build: model.ManifestBuild{
-		"test-1": &model.BuildInfo{
+	Build: build.ManifestBuild{
+		"test-1": &build.Info{
 			Image:      "test/test-1",
 			Context:    ".",
 			Dockerfile: ".",
 		},
-		"test-2": &model.BuildInfo{
+		"test-2": &build.Info{
 			Image:      "test/test-2",
 			Context:    ".",
 			Dockerfile: ".",
-			VolumesToInclude: []model.StackVolume{
+			VolumesToInclude: []build.VolumeMounts{
 				{
 					LocalPath:  "/tmp",
 					RemotePath: "/tmp",
 				},
 			},
 		},
-		"test-3": &model.BuildInfo{
+		"test-3": &build.Info{
 			Context:    ".",
 			Dockerfile: ".",
 		},
-		"test-4": &model.BuildInfo{
+		"test-4": &build.Info{
 			Context:    ".",
 			Dockerfile: ".",
-			VolumesToInclude: []model.StackVolume{
+			VolumesToInclude: []build.VolumeMounts{
 				{
 					LocalPath:  "/tmp",
 					RemotePath: "/tmp",
@@ -65,7 +71,12 @@ var fakeManifest *model.Manifest = &model.Manifest{
 			},
 		},
 	},
-	IsV2: true,
+}
+
+type fakeWorkingDirGetter struct{}
+
+func (f fakeWorkingDirGetter) Get() (string, error) {
+	return "", nil
 }
 
 type fakeRegistry struct {
@@ -116,6 +127,9 @@ func (fr fakeRegistry) AddImageByOpts(opts *types.BuildOptions) error {
 	fr.registry[opts.Tag] = fakeImage{Args: opts.BuildArgs}
 	return nil
 }
+func (fr fakeRegistry) Clone(from, to string) (string, error) {
+	return from, nil
+}
 func (fr fakeRegistry) getFakeImage(image string) fakeImage {
 	v, ok := fr.registry[image]
 	if ok {
@@ -138,53 +152,73 @@ func (fr fakeRegistry) GetImageReference(image string) (registry.OktetoImageRefe
 
 func (fr fakeRegistry) IsGlobalRegistry(image string) bool { return false }
 
-func (fr fakeRegistry) GetRegistryAndRepo(image string) (string, string) { return "", "" }
-func (fr fakeRegistry) GetRepoNameAndTag(repo string) (string, string)   { return "", "" }
-func (fr fakeRegistry) CloneGlobalImageToDev(imageWithDigest, tag string) (string, error) {
-	return "", nil
-}
+func (fr fakeRegistry) GetRegistryAndRepo(image string) (string, string)    { return "", "" }
+func (fr fakeRegistry) GetRepoNameAndTag(repo string) (string, string)      { return "", "" }
+func (fr fakeRegistry) GetDevImageFromGlobal(imageWithDigest string) string { return "" }
 
-func NewFakeBuilder(builder OktetoBuilderInterface, registry oktetoRegistryInterface, cfg oktetoBuilderConfigInterface) *OktetoBuilder {
+func NewFakeBuilder(builder buildCmd.OktetoBuilderInterface, registry oktetoRegistryInterface, cfg oktetoBuilderConfigInterface) *OktetoBuilder {
 	return &OktetoBuilder{
 		Registry:          registry,
-		Builder:           builder,
 		buildEnvironments: make(map[string]string),
-		builtImages:       make(map[string]bool),
-		V1Builder: &v1.OktetoBuilder{
-			Builder:  builder,
-			Registry: registry,
+		Builder: basic.Builder{
+			BuildRunner: builder,
+			IoCtrl:      io.NewIOController(),
 		},
-		Config: cfg,
+		Config:         cfg,
+		ioCtrl:         io.NewIOController(),
+		smartBuildCtrl: smartbuild.NewSmartBuildCtrl(fakeConfigRepo{}, registry, afero.NewMemMapFs(), io.NewIOController(), fakeWorkingDirGetter{}),
+		oktetoContext: &okteto.ContextStateless{
+			Store: &okteto.ContextStore{
+				Contexts: map[string]*okteto.Context{
+					"test": {
+						Namespace: "test",
+						IsOkteto:  true,
+						Registry:  "my-registry",
+					},
+				},
+				CurrentContext: "test",
+			},
+		},
 	}
+}
+
+func TestMain(m *testing.M) {
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
+			"test": {},
+		},
+		CurrentContext: "test",
+	}
+	os.Exit(m.Run())
 }
 
 func TestValidateOptions(t *testing.T) {
 	var tests = []struct {
+		buildSection build.ManifestBuild
 		name         string
-		buildSection model.ManifestBuild
 		svcsToBuild  []string
 		options      types.BuildOptions
 		expectedErr  bool
 	}{
 		{
 			name:         "no services to build",
-			buildSection: model.ManifestBuild{},
+			buildSection: build.ManifestBuild{},
 			svcsToBuild:  []string{},
 			options:      types.BuildOptions{},
 			expectedErr:  true,
 		},
 		{
 			name:         "svc not defined on manifest build section",
-			buildSection: model.ManifestBuild{},
+			buildSection: build.ManifestBuild{},
 			svcsToBuild:  []string{"test"},
 			options:      types.BuildOptions{},
 			expectedErr:  true,
 		},
 		{
 			name: "several services but with flag",
-			buildSection: model.ManifestBuild{
-				"test":   &model.BuildInfo{},
-				"test-2": &model.BuildInfo{},
+			buildSection: build.ManifestBuild{
+				"test":   &build.Info{},
+				"test-2": &build.Info{},
 			},
 			svcsToBuild: []string{"test", "test-2"},
 			options: types.BuildOptions{
@@ -194,8 +228,8 @@ func TestValidateOptions(t *testing.T) {
 		},
 		{
 			name: "only one service without flags",
-			buildSection: model.ManifestBuild{
-				"test": &model.BuildInfo{},
+			buildSection: build.ManifestBuild{
+				"test": &build.Info{},
 			},
 			svcsToBuild: []string{"test"},
 			options:     types.BuildOptions{},
@@ -203,8 +237,8 @@ func TestValidateOptions(t *testing.T) {
 		},
 		{
 			name: "only one service with flags",
-			buildSection: model.ManifestBuild{
-				"test": &model.BuildInfo{},
+			buildSection: build.ManifestBuild{
+				"test": &build.Info{},
 			},
 			svcsToBuild: []string{"test"},
 			options: types.BuildOptions{
@@ -227,62 +261,8 @@ func TestValidateOptions(t *testing.T) {
 	}
 }
 
-func TestOnlyInjectVolumeMountsInOkteto(t *testing.T) {
-	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Namespace: "test",
-				IsOkteto:  true,
-			},
-		},
-		CurrentContext: "test",
-	}
-	dir := t.TempDir()
-
-	registry := newFakeRegistry()
-	builder := test.NewFakeOktetoBuilder(registry)
-	fakeConfig := fakeConfig{
-		isOkteto: true,
-	}
-	bc := NewFakeBuilder(builder, registry, fakeConfig)
-	manifest := &model.Manifest{
-		Name: "test",
-		Build: model.ManifestBuild{
-			"test": &model.BuildInfo{
-				Image: "nginx",
-				VolumesToInclude: []model.StackVolume{
-					{
-						LocalPath:  dir,
-						RemotePath: "test",
-					},
-				},
-			},
-		},
-	}
-	image, err := bc.buildService(ctx, manifest, "test", &types.BuildOptions{})
-
-	// error from the build
-	assert.NoError(t, err)
-	// assert that the name of the image is the dev one
-	assert.Equal(t, "okteto.dev/test-test:okteto-with-volume-mounts", image)
-	// the image is at the fake registry
-	image, err = bc.Registry.GetImageTagWithDigest(image)
-	assert.NoError(t, err)
-	assert.NotEmpty(t, image)
-}
-
 func TestTwoStepsBuild(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Namespace: "test",
-				IsOkteto:  true,
-			},
-		},
-		CurrentContext: "test",
-	}
 
 	dir, err := createDockerfile(t)
 	assert.NoError(t, err)
@@ -295,11 +275,11 @@ func TestTwoStepsBuild(t *testing.T) {
 	bc := NewFakeBuilder(builder, registry, fakeConfig)
 	manifest := &model.Manifest{
 		Name: "test",
-		Build: model.ManifestBuild{
-			"test": &model.BuildInfo{
+		Build: build.ManifestBuild{
+			"test": &build.Info{
 				Context:    dir,
 				Dockerfile: filepath.Join(dir, "Dockerfile"),
-				VolumesToInclude: []model.StackVolume{
+				VolumesToInclude: []build.VolumeMounts{
 					{
 						LocalPath:  dir,
 						RemotePath: "test",
@@ -308,32 +288,18 @@ func TestTwoStepsBuild(t *testing.T) {
 			},
 		},
 	}
-	image, err := bc.buildService(ctx, manifest, "test", &types.BuildOptions{})
+	image, err := bc.buildServiceImages(ctx, manifest, "test", &types.BuildOptions{})
 
-	// error from the build
-	assert.NoError(t, err)
-	// assert that the name of the image is the dev one
-	assert.Equal(t, "okteto.dev/test-test:okteto-with-volume-mounts", image)
+	require.NoError(t, err)
+	require.Equal(t, "okteto.dev/test-test:okteto", image)
 	// the image is at the fake registry
 	image, err = bc.Registry.GetImageTagWithDigest(image)
-	assert.NoError(t, err)
-	assert.NotEmpty(t, image)
-	image, err = bc.Registry.GetImageTagWithDigest("okteto.dev/test-test:okteto")
 	assert.NoError(t, err)
 	assert.NotEmpty(t, image)
 }
 
 func TestBuildWithoutVolumeMountWithoutImage(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Namespace: "test",
-				IsOkteto:  true,
-			},
-		},
-		CurrentContext: "test",
-	}
 
 	dir, err := createDockerfile(t)
 	assert.NoError(t, err)
@@ -346,14 +312,14 @@ func TestBuildWithoutVolumeMountWithoutImage(t *testing.T) {
 	bc := NewFakeBuilder(builder, registry, fakeConfig)
 	manifest := &model.Manifest{
 		Name: "test",
-		Build: model.ManifestBuild{
-			"test": &model.BuildInfo{
+		Build: build.ManifestBuild{
+			"test": &build.Info{
 				Context:    dir,
 				Dockerfile: filepath.Join(dir, "Dockerfile"),
 			},
 		},
 	}
-	image, err := bc.buildService(ctx, manifest, "test", &types.BuildOptions{})
+	image, err := bc.buildServiceImages(ctx, manifest, "test", &types.BuildOptions{})
 
 	// error from the build
 	assert.NoError(t, err)
@@ -367,15 +333,6 @@ func TestBuildWithoutVolumeMountWithoutImage(t *testing.T) {
 
 func TestBuildWithoutVolumeMountWithImage(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Namespace: "test",
-				IsOkteto:  true,
-			},
-		},
-		CurrentContext: "test",
-	}
 
 	dir, err := createDockerfile(t)
 	assert.NoError(t, err)
@@ -388,15 +345,15 @@ func TestBuildWithoutVolumeMountWithImage(t *testing.T) {
 	bc := NewFakeBuilder(builder, registry, fakeConfig)
 	manifest := &model.Manifest{
 		Name: "test",
-		Build: model.ManifestBuild{
-			"test": &model.BuildInfo{
+		Build: build.ManifestBuild{
+			"test": &build.Info{
 				Context:    dir,
 				Dockerfile: filepath.Join(dir, "Dockerfile"),
 				Image:      "okteto/test",
 			},
 		},
 	}
-	image, err := bc.buildService(ctx, manifest, "test", &types.BuildOptions{})
+	image, err := bc.buildServiceImages(ctx, manifest, "test", &types.BuildOptions{})
 
 	// error from the build
 	assert.NoError(t, err)
@@ -410,16 +367,6 @@ func TestBuildWithoutVolumeMountWithImage(t *testing.T) {
 
 func TestBuildWithStack(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Namespace: "test",
-				IsOkteto:  true,
-				Registry:  "my-registry",
-			},
-		},
-		CurrentContext: "test",
-	}
 
 	dir, err := createDockerfile(t)
 	assert.NoError(t, err)
@@ -433,15 +380,15 @@ func TestBuildWithStack(t *testing.T) {
 	manifest := &model.Manifest{
 		Name: "test",
 		Type: model.StackType,
-		Build: model.ManifestBuild{
-			"test": &model.BuildInfo{
+		Build: build.ManifestBuild{
+			"test": &build.Info{
 				Context:    dir,
 				Dockerfile: filepath.Join(dir, "Dockerfile"),
 				Image:      "okteto/test:q",
 			},
 		},
 	}
-	image, err := bc.buildService(ctx, manifest, "test", &types.BuildOptions{})
+	image, err := bc.buildServiceImages(ctx, manifest, "test", &types.BuildOptions{})
 
 	// error from the build
 	assert.NoError(t, err)
@@ -451,25 +398,6 @@ func TestBuildWithStack(t *testing.T) {
 	image, err = bc.Registry.GetImageTagWithDigest(image)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, image)
-}
-
-func Test_getAccessibleVolumeMounts(t *testing.T) {
-	existingPath := "./existing-folder"
-	missingPath := "./missing-folder"
-	buildInfo := &model.BuildInfo{
-		VolumesToInclude: []model.StackVolume{
-			{LocalPath: existingPath, RemotePath: "/data/logs"},
-			{LocalPath: missingPath, RemotePath: "/data/logs"},
-		},
-	}
-	err := os.Mkdir(existingPath, 0750)
-	if err != nil {
-		t.Fatal(err)
-	}
-	volumes := getAccessibleVolumeMounts(buildInfo)
-	err = os.Remove(existingPath)
-	assert.NoError(t, err)
-	assert.Len(t, volumes, 1)
 }
 
 func createDockerfile(t *testing.T) (string, error) {
@@ -484,16 +412,6 @@ func createDockerfile(t *testing.T) (string, error) {
 
 func TestBuildWithDependsOn(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Namespace: "test",
-				IsOkteto:  true,
-				Registry:  "my-registry",
-			},
-		},
-		CurrentContext: "test",
-	}
 
 	firstImage := "okteto/a:test"
 	secondImage := "okteto/b:test"
@@ -505,16 +423,17 @@ func TestBuildWithDependsOn(t *testing.T) {
 	fakeConfig := fakeConfig{
 		isOkteto: true,
 	}
+
 	bc := NewFakeBuilder(builder, registry, fakeConfig)
 	manifest := &model.Manifest{
 		Name: "test",
-		Build: model.ManifestBuild{
-			"a": &model.BuildInfo{
+		Build: build.ManifestBuild{
+			"a": &build.Info{
 				Context:    dir,
 				Dockerfile: filepath.Join(dir, "Dockerfile"),
 				Image:      firstImage,
 			},
-			"b": &model.BuildInfo{
+			"b": &build.Info{
 				Context:    dir,
 				Dockerfile: filepath.Join(dir, "Dockerfile"),
 				Image:      secondImage,
@@ -555,4 +474,116 @@ func TestBuildWithDependsOn(t *testing.T) {
 		}
 	}
 
+}
+
+func Test_areAllServicesBuilt(t *testing.T) {
+	tests := []struct {
+		name     string
+		control  map[string]bool
+		input    []string
+		expected bool
+	}{
+		{
+			name:     "all built",
+			expected: true,
+			input:    []string{"one", "two", "three"},
+			control: map[string]bool{
+				"one":   true,
+				"two":   true,
+				"three": true,
+			},
+		},
+		{
+			name:     "none built",
+			expected: false,
+			input:    []string{"one", "two", "three"},
+			control:  map[string]bool{},
+		},
+		{
+			name:     "some built",
+			expected: false,
+			input:    []string{"one", "two", "three"},
+			control: map[string]bool{
+				"one": true,
+				"two": true,
+			},
+		},
+		{
+			name:     "nil control",
+			expected: false,
+			input:    []string{"one", "two", "three"},
+		},
+		{
+			name:     "nil input",
+			expected: true,
+			control: map[string]bool{
+				"one": true,
+				"two": true,
+			},
+		},
+		{
+			name:     "empty input",
+			expected: true,
+			input:    []string{},
+			control: map[string]bool{
+				"one": true,
+				"two": true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := areAllServicesBuilt(tt.input, tt.control)
+			require.Equal(t, tt.expected, got)
+		})
+
+	}
+}
+
+func Test_skipServiceBuild(t *testing.T) {
+	tests := []struct {
+		name     string
+		control  map[string]bool
+		input    string
+		expected bool
+	}{
+		{
+			name:     "is built",
+			expected: true,
+			input:    "one",
+			control: map[string]bool{
+				"one":   true,
+				"two":   true,
+				"three": true,
+			},
+		},
+		{
+			name:     "not built",
+			expected: false,
+			input:    "one",
+			control:  map[string]bool{},
+		},
+		{
+			name:     "nil control",
+			expected: false,
+			input:    "one",
+		},
+		{
+			name:     "empty input",
+			expected: false,
+			control: map[string]bool{
+				"one": true,
+				"two": true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := skipServiceBuild(tt.input, tt.control)
+			require.Equal(t, tt.expected, got)
+		})
+
+	}
 }

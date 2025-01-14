@@ -42,14 +42,13 @@ func TestPipelineCommand(t *testing.T) {
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	testNamespace := integration.GetTestNamespace("TestPipeline", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
 
 	pipelineOptions := &commands.DeployPipelineOptions{
 		Namespace:  testNamespace,
@@ -71,6 +70,7 @@ func TestPipelineCommand(t *testing.T) {
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoPipelineDestroy(oktetoPath, pipelineDestroyOptions))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func TestPipelineDeployWithReuse(t *testing.T) {
@@ -80,16 +80,17 @@ func TestPipelineDeployWithReuse(t *testing.T) {
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	testNamespace := integration.GetTestNamespace("TestPipelineDeployWithReuse", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
 
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 	c, _, err := okteto.NewK8sClientProvider().Provide(kubeconfig.Get([]string{filepath.Join(dir, ".kube", "config")}))
 	require.NoError(t, err)
 
@@ -128,5 +129,5 @@ func TestPipelineDeployWithReuse(t *testing.T) {
 
 	require.Contains(t, cmapRedeploy.Labels, "label.okteto.com/test-label")
 	require.Equal(t, cmap.CreationTimestamp, cmapRedeploy.CreationTimestamp)
-
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }

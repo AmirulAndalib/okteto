@@ -21,10 +21,11 @@ import (
 	"testing"
 
 	"github.com/okteto/okteto/internal/test"
+	"github.com/okteto/okteto/pkg/build"
 	"github.com/okteto/okteto/pkg/model"
-	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_SetServiceEnvVars(t *testing.T) {
@@ -118,21 +119,14 @@ func Test_SetServiceEnvVars(t *testing.T) {
 
 func TestExpandStackVariables(t *testing.T) {
 	ctx := context.Background()
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Namespace: "test",
-				IsOkteto:  true,
-			},
-		},
-		CurrentContext: "test",
-	}
-
 	registry := newFakeRegistry()
 	builder := test.NewFakeOktetoBuilder(registry)
 	fakeConfig := fakeConfig{
 		isOkteto: true,
 	}
+
+	err := registry.AddImageByName("okteto.global/test-test:a32545ef109a8f1e44b67b9c90727db563e88c5898c228bdb922ce555cec2856")
+	require.NoError(t, err)
 	bc := NewFakeBuilder(builder, registry, fakeConfig)
 	stack := &model.Stack{
 		Services: map[string]*model.Service{
@@ -144,10 +138,9 @@ func TestExpandStackVariables(t *testing.T) {
 
 	manifest := &model.Manifest{
 		Name: "test",
-		Build: model.ManifestBuild{
-			"test": &model.BuildInfo{
-				Image: "nginx",
-				VolumesToInclude: []model.StackVolume{
+		Build: build.ManifestBuild{
+			"test": &build.Info{
+				VolumesToInclude: []build.VolumeMounts{
 					{
 						LocalPath:  "test",
 						RemotePath: "test",
@@ -161,9 +154,8 @@ func TestExpandStackVariables(t *testing.T) {
 			},
 		},
 		Type: model.StackType,
-		IsV2: true,
 	}
-	err := bc.Build(ctx, &types.BuildOptions{
+	err = bc.Build(ctx, &types.BuildOptions{
 		Manifest: manifest,
 	})
 

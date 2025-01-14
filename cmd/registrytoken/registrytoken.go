@@ -18,14 +18,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/docker/docker-credential-helpers/credentials"
 	contextCMD "github.com/okteto/okteto/cmd/context"
-
 	"github.com/okteto/okteto/pkg/auth/dockercredentials"
 	"github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/spf13/cobra"
-
-	"github.com/docker/docker-credential-helpers/credentials"
 )
 
 // TODO @jpf-okteto the following commit, included in v0.8.0 defines
@@ -64,11 +62,11 @@ More info about docker credentials helpers here: https://github.com/docker/docke
   `,
 		Hidden:    true,
 		ValidArgs: []string{ActionStore, ActionGet, ActionErase, ActionList, ActionVersion},
-		Args:      cobra.ExactValidArgs(1),
+		Args:      cobra.MatchAll(cobra.ExactArgs(1)),
 	}
 
 	cmd.Run = func(_ *cobra.Command, args []string) {
-		if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.ContextOptions{}); err != nil {
+		if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.Options{}); err != nil {
 			_, _ = fmt.Fprintln(os.Stdout, err)
 			os.Exit(1) // skipcq: RVV-A0003
 		}
@@ -92,7 +90,8 @@ More info about docker credentials helpers here: https://github.com/docker/docke
 }
 
 func IsRegistryCredentialHelperCommand(args []string) bool {
-	if len(args) != 3 {
+	validArgsLength := 3
+	if len(args) != validArgsLength {
 		return false
 	}
 

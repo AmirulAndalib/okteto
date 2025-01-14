@@ -1,60 +1,75 @@
-# syntax = docker/dockerfile:experimental
+ARG KUBECTL_VERSION=1.30.8
+ARG HELM_VERSION=3.16.4
+ARG SYNCTHING_VERSION=1.29.2
+ARG OKTETO_REMOTE_VERSION=0.6.2
+ARG OKTETO_SUPERVISOR_VERSION=0.4.1
+ARG OKTETO_CLEAN_VERSION=0.2.2
+ARG KUSTOMIZE_VERSION=5.5.0
 
-ARG KUBECTL_VERSION=1.22.17
-ARG HELM_VERSION=3.12.1
-ARG KUSTOMIZE_VERSION=5.0.0
 
-FROM golang:1.20-bullseye as kubectl-builder
-ARG KUBECTL_VERSION
-RUN curl -sLf --retry 3 -o kubectl https://storage.googleapis.com/kubernetes-release/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl && \
-    cp kubectl /usr/local/bin/kubectl && \
-    chmod +x /usr/local/bin/kubectl && \
-    /usr/local/bin/kubectl version --client=true
+FROM syncthing/syncthing:${SYNCTHING_VERSION} AS syncthing
+FROM okteto/remote:${OKTETO_REMOTE_VERSION} AS remote
+FROM okteto/supervisor:${OKTETO_SUPERVISOR_VERSION} AS supervisor
+FROM okteto/clean:${OKTETO_CLEAN_VERSION} AS clean
+FROM golang:1.22.9-bookworm AS golang-builder
 
-FROM golang:1.20-bullseye as helm-builder
-ARG HELM_VERSION
-RUN curl -sLf --retry 3 -o helm.tar.gz https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz && \
-    mkdir -p helm && tar -C helm -xf helm.tar.gz && \
-    cp helm/linux-amd64/helm /usr/local/bin/helm && \
-    chmod +x /usr/local/bin/helm && \
-    /usr/local/bin/helm version
-
-FROM golang:1.20-bullseye as kustomize-builder
+FROM golang-builder as kustomize-builder
+ARG TARGETARCH
 ARG KUSTOMIZE_VERSION
-RUN curl -sLf --retry 3 -o kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz \
+RUN curl -sLf --retry 3 -o kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_${TARGETARCH}.tar.gz \
     && tar -xvzf kustomize.tar.gz -C /usr/local/bin \
     && chmod +x /usr/local/bin/kustomize \
     && /usr/local/bin/kustomize version
 
-FROM golang:1.20-buster as builder
-WORKDIR /okteto
+FROM alpine:3.20 AS certs
+RUN apk add --no-cache ca-certificates
 
+FROM golang-builder AS kubectl-builder
+ARG TARGETARCH
+ARG KUBECTL_VERSION
+RUN curl -sLf --retry 3 -o kubectl https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl && \
+    cp kubectl /usr/local/bin/kubectl && \
+    chmod +x /usr/local/bin/kubectl && \
+    /usr/local/bin/kubectl version --client=true
+
+FROM golang-builder AS helm-builder
+ARG TARGETARCH
+ARG HELM_VERSION
+RUN curl -sLf --retry 3 -o helm.tar.gz https://get.helm.sh/helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz && \
+    mkdir -p helm && tar -C helm -xf helm.tar.gz && \
+    cp helm/linux-${TARGETARCH}/helm /usr/local/bin/helm && \
+    chmod +x /usr/local/bin/helm && \
+    /usr/local/bin/helm version
+
+
+FROM golang-builder AS builder
+WORKDIR /okteto
 ENV CGO_ENABLED=0
 ARG VERSION_STRING=docker
-COPY go.mod .
-COPY go.sum .
-RUN --mount=type=cache,target=/root/.cache go mod download
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
 COPY . .
-RUN --mount=type=cache,target=/root/.cache make build
-RUN chmod +x /okteto/bin/okteto
-
-# Test
-RUN /okteto/bin/okteto version
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    make build && \
+    /okteto/bin/okteto version
 
 COPY docker-credential-okteto /okteto/bin/docker-credential-okteto
 
-FROM alpine:3
+FROM busybox:1.36.1
 
-RUN apk add --no-cache bash ca-certificates
-
-COPY --from=kubectl-builder /usr/local/bin/kubectl /usr/local/bin/kubectl
-COPY --from=helm-builder /usr/local/bin/helm /usr/local/bin/helm
-COPY --from=kustomize-builder /usr/local/bin/kustomize /usr/local/bin/kustomize
-
-COPY --from=builder /okteto/bin/okteto /usr/local/bin/okteto
-COPY --from=builder /okteto/bin/docker-credential-okteto /usr/local/bin/docker-credential-okteto
+COPY --chmod=755 --from=certs /etc/ssl/certs /etc/ssl/certs
+COPY --chmod=755 --from=kubectl-builder /usr/local/bin/kubectl /usr/local/bin/kubectl
+COPY --chmod=755 --from=kustomize-builder /usr/local/bin/kustomize /usr/local/bin/kustomize
+COPY --chmod=755 --from=helm-builder /usr/local/bin/helm /usr/local/bin/helm
+COPY --chmod=755 --from=builder /okteto/bin/okteto /usr/local/bin/okteto
+COPY --chmod=755 --from=builder /okteto/bin/docker-credential-okteto /usr/local/bin/docker-credential-okteto
+COPY --chmod=755 --from=remote /usr/local/bin/remote /usr/bin-image/bin/okteto-remote
+COPY --chmod=755 --from=supervisor /usr/local/bin/supervisor /usr/bin-image/bin/okteto-supervisor
+COPY --chmod=755 --from=syncthing /bin/syncthing /usr/bin-image/bin/syncthing
+COPY --chmod=755 --from=clean /usr/local/bin/clean /usr/bin-image/bin/clean
+COPY --chmod=755 scripts/start.sh /usr/bin-image/bin/start.sh
 
 
 ENV OKTETO_DISABLE_SPINNER=true
-
 ENV PS1="\[\e[36m\]\${OKTETO_NAMESPACE:-okteto}:\e[32m\]\${OKTETO_NAME:-dev} \[\e[m\]\W> "

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	dockertypes "github.com/docker/cli/cli/config/types"
+	"github.com/okteto/okteto/pkg/env"
 )
 
 // OktetoInterface represents the client that connects to the backend to create API calls
@@ -32,11 +33,12 @@ type OktetoInterface interface {
 
 // UserInterface represents the client that connects to the user functions
 type UserInterface interface {
-	GetUserSecrets(ctx context.Context) ([]Secret, error)
+	GetOktetoPlatformVariables(ctx context.Context) ([]env.Var, error)
 	GetContext(ctx context.Context, ns string) (*UserContext, error)
 	GetClusterCertificate(ctx context.Context, cluster, ns string) ([]byte, error)
 	GetClusterMetadata(ctx context.Context, ns string) (ClusterMetadata, error)
 	GetRegistryCredentials(ctx context.Context, host string) (dockertypes.AuthConfig, error)
+	GetExecutionEnv(ctx context.Context) (map[string]string, error)
 }
 
 // NamespaceInterface represents the client that connects to the namespace functions
@@ -48,6 +50,7 @@ type NamespaceInterface interface {
 	Sleep(ctx context.Context, namespace string) error
 	DestroyAll(ctx context.Context, namespace string, destroyVolumes bool) error
 	Wake(ctx context.Context, namespace string) error
+	Get(ctx context.Context, namespace string) (*Namespace, error)
 }
 
 // PreviewInterface represents the client that connects to the preview functions
@@ -57,6 +60,7 @@ type PreviewInterface interface {
 	GetResourcesStatus(ctx context.Context, previewName, devName string) (map[string]string, error)
 	Destroy(ctx context.Context, previewName string) error
 	ListEndpoints(ctx context.Context, previewName string) ([]Endpoint, error)
+	Get(ctx context.Context, previewName string) (*Preview, error)
 }
 
 // PipelineInterface represents the client that connects to the pipeline functions
@@ -84,4 +88,9 @@ type StreamInterface interface {
 type KubetokenInterface interface {
 	GetKubeToken(baseURL, namespace string) (KubeTokenResponse, error)
 	CheckService(baseURL, namespace string) error
+}
+
+// EndpointClientInterface represents the endpoint client
+type EndpointClientInterface interface {
+	List(ctx context.Context, ns, label string) ([]string, error)
 }

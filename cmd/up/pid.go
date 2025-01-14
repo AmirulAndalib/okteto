@@ -30,11 +30,11 @@ const oktetoPIDFilename = "okteto.pid"
 
 // PIDController creates get and removes the info about the OktetoPID
 type pidController struct {
-	pidFilePath        string
 	filesystem         afero.Fs
 	pidProvider        pidProvider
 	pidWatcherProvider pidWatcherProvider
 	watcher            pidWatcher
+	pidFilePath        string
 }
 
 type pidProvider interface {
@@ -121,7 +121,7 @@ func (pc pidController) delete() {
 	}
 
 	if err := pc.watcher.Close(); err != nil {
-		oktetoLog.Infof("could not close watcher: %w", err)
+		oktetoLog.Infof("could not close watcher: %s", err)
 	}
 
 	if strconv.Itoa(pid) != filePID {

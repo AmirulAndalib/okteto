@@ -22,11 +22,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type PipelineDeployerInterface interface {
+type DeployerInterface interface {
 	ExecuteDeployPipeline(ctx context.Context, opts *DeployOptions) error
 }
-type PipelineInterface interface {
-	PipelineDeployerInterface
+type Interface interface {
+	DeployerInterface
 }
 
 // Command has all the pipeline subcommands
@@ -37,7 +37,7 @@ type Command struct {
 
 // NewCommand creates a namespace command to
 func NewCommand() (*Command, error) {
-	var okClient = &okteto.OktetoClient{}
+	var okClient = &okteto.Client{}
 	if okteto.IsOkteto() {
 		c, err := okteto.NewOktetoClient()
 		if err != nil {
@@ -55,8 +55,8 @@ func NewCommand() (*Command, error) {
 func Pipeline(ctx context.Context) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pipeline",
-		Short: "Pipeline management commands",
-		Args:  utils.NoArgsAccepted("https://www.okteto.com/docs/reference/cli/#pipeline"),
+		Short: "Development Environments management commands",
+		Args:  utils.NoArgsAccepted("https://www.okteto.com/docs/reference/okteto-cli/#pipeline"),
 	}
 	cmd.AddCommand(deploy(ctx))
 	cmd.AddCommand(destroy(ctx))

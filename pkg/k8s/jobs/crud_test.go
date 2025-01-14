@@ -87,10 +87,10 @@ func TestUpdate(t *testing.T) {
 
 func TestDestroy(t *testing.T) {
 	var tests = []struct {
+		job       *batchv1.Job
 		name      string
 		jobName   string
 		namespace string
-		job       *batchv1.Job
 		deleted   bool
 	}{
 		{
@@ -170,7 +170,7 @@ func TestIsSuccedded(t *testing.T) {
 			Namespace: "test",
 		},
 		Spec: batchv1.JobSpec{
-			Completions: pointer.Int32Ptr(1),
+			Completions: pointer.Int32(1),
 		},
 		Status: batchv1.JobStatus{
 			Succeeded: 1,
@@ -182,7 +182,7 @@ func TestIsSuccedded(t *testing.T) {
 			Namespace: "test",
 		},
 		Spec: batchv1.JobSpec{
-			Completions: pointer.Int32Ptr(2),
+			Completions: pointer.Int32(2),
 		},
 		Status: batchv1.JobStatus{
 			Succeeded: 1,
@@ -208,8 +208,8 @@ func TestIsFailed(t *testing.T) {
 			Namespace: "test",
 		},
 		Spec: batchv1.JobSpec{
-			Completions:  pointer.Int32Ptr(1),
-			BackoffLimit: pointer.Int32Ptr(0),
+			Completions:  pointer.Int32(1),
+			BackoffLimit: pointer.Int32(0),
 		},
 		Status: batchv1.JobStatus{
 			Failed: 1,
@@ -221,8 +221,8 @@ func TestIsFailed(t *testing.T) {
 			Namespace: "test",
 		},
 		Spec: batchv1.JobSpec{
-			Completions:  pointer.Int32Ptr(2),
-			BackoffLimit: pointer.Int32Ptr(0),
+			Completions:  pointer.Int32(2),
+			BackoffLimit: pointer.Int32(0),
 		},
 		Status: batchv1.JobStatus{
 			Failed: 0,

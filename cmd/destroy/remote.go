@@ -15,235 +15,150 @@ package destroy
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"math/big"
-	"net"
 	"os"
-	"path/filepath"
-	"regexp"
+	"path"
 	"strings"
-	"text/template"
 
-	"github.com/okteto/okteto/pkg/config"
-
-	"github.com/mitchellh/go-homedir"
-	builder "github.com/okteto/okteto/cmd/build"
-
-	remoteBuild "github.com/okteto/okteto/cmd/build/remote"
+	"github.com/okteto/okteto/pkg/build/buildkit"
+	buildCmd "github.com/okteto/okteto/pkg/cmd/build"
+	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/deployable"
+	"github.com/okteto/okteto/pkg/env"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/filesystem"
-	"github.com/okteto/okteto/pkg/remote"
-
-	"github.com/okteto/okteto/pkg/cmd/build"
-	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/ignore"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/okteto"
-	"github.com/okteto/okteto/pkg/types"
+	"github.com/okteto/okteto/pkg/remote"
 	"github.com/spf13/afero"
 )
 
 const (
 	templateName           = "destroy-dockerfile"
-	dockerfileTemporalNane = "Dockerfile.destroy"
-	dockerfileTemplate     = `
-FROM {{ .OktetoCLIImage }} as okteto-cli
-
-FROM {{ .UserDestroyImage }} as deploy
-
-ENV PATH="${PATH}:/okteto/bin"
-COPY --from=okteto-cli /usr/local/bin/* /okteto/bin/
-
-ENV {{ .RemoteDeployEnvVar }} true
-
-ARG {{ .NamespaceArgName }}
-ARG {{ .ContextArgName }}
-ARG {{ .TokenArgName }}
-ARG {{ .ActionNameArgName }}
-ARG {{ .TlsCertBase64ArgName }}
-ARG {{ .InternalServerName }}
-RUN mkdir -p /etc/ssl/certs/
-RUN echo "${{ .TlsCertBase64ArgName }}" | base64 -d > /etc/ssl/certs/okteto.crt
-
-COPY . /okteto/src
-WORKDIR /okteto/src
-
-ARG {{ .GitCommitArgName }}
-ARG {{ .InvalidateCacheArgName }}
-
-RUN okteto registrytoken install --force --log-output=json
-
-RUN --mount=type=secret,id=known_hosts --mount=id=remote,type=ssh \
-  mkdir -p $HOME/.ssh && echo "UserKnownHostsFile=/run/secrets/known_hosts" >> $HOME/.ssh/config && \
-  okteto destroy --log-output=json --server-name="${{ .InternalServerName }}" {{ .DestroyFlags }}
-`
+	dockerfileTemporalName = "Dockerfile.destroy"
 )
 
-type dockerfileTemplateProperties struct {
-	OktetoCLIImage         string
-	UserDestroyImage       string
-	RemoteDeployEnvVar     string
-	ContextArgName         string
-	NamespaceArgName       string
-	TokenArgName           string
-	TlsCertBase64ArgName   string
-	InternalServerName     string
-	ActionNameArgName      string
-	GitCommitArgName       string
-	InvalidateCacheArgName string
-	DestroyFlags           string
+// remoteRunner is the interface to run the destroy command remotely. The implementation is using
+// an image builder like BuildKit
+type remoteRunner interface {
+	Run(ctx context.Context, params *remote.Params) error
 }
 
 type remoteDestroyCommand struct {
-	builder              builder.Builder
-	destroyImage         string
-	fs                   afero.Fs
-	workingDirectoryCtrl filesystem.WorkingDirectoryInterface
-	temporalCtrl         filesystem.TemporalDirectoryInterface
-	manifest             *model.Manifest
-	registry             remoteBuild.OktetoRegistryInterface
-	clusterMetadata      func(context.Context) (*types.ClusterMetadata, error)
+	runner   remoteRunner
+	manifest *model.Manifest
 
-	// sshAuthSockEnvvar is the default for SSH_AUTH_SOCK. Provided mostly for testing
-	sshAuthSockEnvvar string
+	// ioCtrl is the controller for the output of the Build logs
+	ioCtrl *io.Controller
 
-	// knownHostsPath  is the default known_hosts file path. Provided mostly for testing
-	knownHostsPath string
+	workdirCtrl filesystem.WorkingDirectoryInterface
 }
 
-func newRemoteDestroyer(manifest *model.Manifest) *remoteDestroyCommand {
+// newRemoteDestroyer creates a new remote destroyer
+func newRemoteDestroyer(manifest *model.Manifest, ioCtrl *io.Controller) *remoteDestroyCommand {
 	fs := afero.NewOsFs()
-	builder := remoteBuild.NewBuilderFromScratch()
+	builder := buildCmd.NewOktetoBuilder(
+		&okteto.ContextStateless{
+			Store: okteto.GetContextStore(),
+		},
+		fs,
+		ioCtrl,
+	)
+	runner := remote.NewRunner(ioCtrl, builder)
+	if manifest == nil {
+		manifest = &model.Manifest{}
+	}
 	if manifest.Destroy == nil {
 		manifest.Destroy = &model.DestroyInfo{}
 	}
 	return &remoteDestroyCommand{
-		builder:              builder,
-		destroyImage:         manifest.Destroy.Image,
-		fs:                   fs,
-		workingDirectoryCtrl: filesystem.NewOsWorkingDirectoryCtrl(),
-		temporalCtrl:         filesystem.NewTemporalDirectoryCtrl(fs),
-		manifest:             manifest,
-		registry:             builder.Registry,
-		clusterMetadata:      fetchClusterMetadata,
+		runner:      runner,
+		manifest:    manifest,
+		ioCtrl:      ioCtrl,
+		workdirCtrl: filesystem.NewOsWorkingDirectoryCtrl(),
 	}
 }
 
-func (rd *remoteDestroyCommand) destroy(ctx context.Context, opts *Options) error {
-	home, err := homedir.Dir()
+func (rd *remoteDestroyCommand) Destroy(ctx context.Context, opts *Options) error {
+	if opts.Manifest == nil {
+		opts.Manifest = &model.Manifest{}
+	}
+
+	if opts.Manifest.Destroy == nil {
+		opts.Manifest.Destroy = &model.DestroyInfo{}
+	}
+
+	baseImage := ""
+	if opts.Manifest.Destroy.Image != "" {
+		baseImage = opts.Manifest.Destroy.Image
+	}
+
+	dep := deployable.Entity{
+		Commands: opts.Manifest.Destroy.Commands,
+		// Added this for backward compatibility. Before the refactor we were having the env variables for the external
+		// resources in the environment, so including it to set the env vars in the remote-run
+		External: opts.Manifest.External,
+	}
+
+	commandFlags, err := getCommandFlags(opts)
 	if err != nil {
 		return err
 	}
 
-	sc, err := rd.clusterMetadata(ctx)
+	workdirCtrl := rd.workdirCtrl
+	if workdirCtrl == nil {
+		workdirCtrl = filesystem.NewOsWorkingDirectoryCtrl()
+	}
+
+	cwd, err := workdirCtrl.Get()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve working directory for remote deploy: %w", err)
 	}
 
-	if rd.destroyImage == "" {
-		rd.destroyImage = sc.PipelineRunnerImage
+	ctxPath := cwd
+	if opts.Manifest.Destroy != nil {
+		ctxPath = path.Clean(path.Join(cwd, opts.Manifest.Destroy.Context))
 	}
 
-	cwd, err := rd.workingDirectoryCtrl.Get()
+	ig, err := ignore.NewFromFile(path.Join(ctxPath, model.IgnoreFilename))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read ignore file: %w", err)
 	}
-
-	tmpDir, err := rd.temporalCtrl.Create()
+	rules, err := ig.Rules(ignore.RootSection, "destroy")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create ignore rules for remote destroy: %w", err)
 	}
 
-	dockerfile, err := rd.createDockerfile(tmpDir, opts)
-	if err != nil {
-		return err
+	runParams := remote.Params{
+		BaseImage:        baseImage,
+		ManifestPathFlag: opts.ManifestPathFlag,
+		TemplateName:     templateName,
+		CommandFlags:     commandFlags,
+		BuildEnvVars:     make(map[string]string),
+		ExecutionEnvVars: deployable.GetPlatformEnvironment(ctx),
+		OktetoCommandSpecificEnvVars: map[string]string{
+			constants.OktetoIsPreviewEnvVar: os.Getenv(constants.OktetoIsPreviewEnvVar),
+		},
+		DependenciesEnvVars:         make(map[string]string),
+		DockerfileName:              dockerfileTemporalName,
+		Deployable:                  dep,
+		Manifest:                    opts.Manifest,
+		Command:                     remote.DestroyCommand,
+		IgnoreRules:                 rules,
+		UseOktetoDeployIgnoreFile:   true,
+		ContextAbsolutePathOverride: ctxPath,
 	}
 
-	defer func() {
-		if err := rd.fs.Remove(dockerfile); err != nil {
-			oktetoLog.Infof("error removing dockerfile: %w", err)
-		}
-	}()
-
-	buildInfo := &model.BuildInfo{
-		Dockerfile: dockerfile,
-	}
-
-	// undo modification of CWD for Build command
-	if err := rd.workingDirectoryCtrl.Change(cwd); err != nil {
-		return err
-	}
-
-	randomNumber, err := rand.Int(rand.Reader, big.NewInt(1000000))
-	if err != nil {
-		return err
-	}
-
-	buildOptions := build.OptsFromBuildInfoForRemoteDeploy(buildInfo, &types.BuildOptions{Path: cwd, OutputMode: "destroy"})
-	buildOptions.Manifest = rd.manifest
-	buildOptions.BuildArgs = append(
-		buildOptions.BuildArgs,
-		fmt.Sprintf("%s=%s", model.OktetoContextEnvVar, okteto.Context().Name),
-		fmt.Sprintf("%s=%s", model.OktetoNamespaceEnvVar, okteto.Context().Namespace),
-		fmt.Sprintf("%s=%s", model.OktetoTokenEnvVar, okteto.Context().Token),
-		fmt.Sprintf("%s=%s", constants.OktetoTlsCertBase64EnvVar, base64.StdEncoding.EncodeToString(sc.Certificate)),
-		fmt.Sprintf("%s=%s", constants.OktetoInternalServerNameEnvVar, sc.ServerName),
-		fmt.Sprintf("%s=%s", model.OktetoActionNameEnvVar, os.Getenv(model.OktetoActionNameEnvVar)),
-		fmt.Sprintf("%s=%s", constants.OktetoGitCommitEnvVar, os.Getenv(constants.OktetoGitCommitEnvVar)),
-		fmt.Sprintf("%s=%d", constants.OktetoInvalidateCacheEnvVar, int(randomNumber.Int64())),
-	)
-
-	if sc.ServerName != "" {
-		registryUrl := okteto.Context().Registry
-		subdomain := strings.TrimPrefix(registryUrl, "registry.")
-		ip, _, err := net.SplitHostPort(sc.ServerName)
-		if err != nil {
-			return fmt.Errorf("failed to parse server name network address: %w", err)
-		}
-		buildOptions.ExtraHosts = []types.HostMap{
-			{Hostname: registryUrl, IP: ip},
-			{Hostname: fmt.Sprintf("kubernetes.%s", subdomain), IP: ip},
-		}
-	}
-
-	sshSock := os.Getenv(rd.sshAuthSockEnvvar)
-	if sshSock == "" {
-		sshSock = os.Getenv("SSH_AUTH_SOCK")
-	}
-
-	if sshSock != "" {
-		if _, err := os.Stat(sshSock); err != nil {
-			oktetoLog.Debugf("Not mounting ssh agent. Error reading socket: %s", err.Error())
-		} else {
-			sshSession := types.BuildSshSession{Id: "remote", Target: sshSock}
-			buildOptions.SshSessions = append(buildOptions.SshSessions, sshSession)
-		}
-
-		// TODO: check if ~/.ssh/config exists and has UserKnownHostsFile defined
-		knownHostsPath := rd.knownHostsPath
-		if knownHostsPath == "" {
-			knownHostsPath = filepath.Join(home, ".ssh", "known_hosts")
-		}
-		if _, err := os.Stat(knownHostsPath); err != nil {
-			oktetoLog.Debugf("Not know_hosts file. Error reading file: %s", err.Error())
-		} else {
-			oktetoLog.Debugf("reading known hosts from %s", knownHostsPath)
-			buildOptions.Secrets = append(buildOptions.Secrets, fmt.Sprintf("id=known_hosts,src=%s", knownHostsPath))
-		}
-
-	} else {
-		oktetoLog.Debug("no ssh agent found. Not mouting ssh-agent for build")
-	}
-
-	// we need to call Build() method using a remote builder. This Builder will have
+	// we need to call Run() method using a remote builder. This Builder will have
 	// the same behavior as the V1 builder but with a different output taking into
 	// account that we must not confuse the user with build messages since this logic is
 	// executed in the deploy command.
-	if err := rd.builder.Build(ctx, buildOptions); err != nil {
-		var cmdErr build.OktetoCommandErr
+	if err := rd.runner.Run(ctx, &runParams); err != nil {
+		var cmdErr buildkit.CommandErr
 		if errors.As(err, &cmdErr) {
 			oktetoLog.SetStage(cmdErr.Stage)
 			return oktetoErrors.UserError{
@@ -265,104 +180,26 @@ func (rd *remoteDestroyCommand) destroy(ctx context.Context, opts *Options) erro
 	return nil
 }
 
-func (rd *remoteDestroyCommand) createDockerfile(tempDir string, opts *Options) (string, error) {
-	cwd, err := rd.workingDirectoryCtrl.Get()
-	if err != nil {
-		return "", err
-	}
-
-	tmpl := template.Must(template.New(templateName).Parse(dockerfileTemplate))
-	dockerfileSyntax := dockerfileTemplateProperties{
-		OktetoCLIImage:         getOktetoCLIVersion(config.VersionString),
-		UserDestroyImage:       rd.destroyImage,
-		RemoteDeployEnvVar:     constants.OktetoDeployRemote,
-		ContextArgName:         model.OktetoContextEnvVar,
-		NamespaceArgName:       model.OktetoNamespaceEnvVar,
-		TokenArgName:           model.OktetoTokenEnvVar,
-		TlsCertBase64ArgName:   constants.OktetoTlsCertBase64EnvVar,
-		InternalServerName:     constants.OktetoInternalServerNameEnvVar,
-		ActionNameArgName:      model.OktetoActionNameEnvVar,
-		GitCommitArgName:       constants.OktetoGitCommitEnvVar,
-		InvalidateCacheArgName: constants.OktetoInvalidateCacheEnvVar,
-		DestroyFlags:           strings.Join(getDestroyFlags(opts), " "),
-	}
-
-	dockerfile, err := rd.fs.Create(filepath.Join(tempDir, dockerfileTemporalNane))
-	if err != nil {
-		return "", err
-	}
-
-	if err = remote.CreateDockerignoreFileWithFilesystem(cwd, tempDir, opts.ManifestPathFlag, rd.fs); err != nil {
-		return "", err
-	}
-
-	if err := tmpl.Execute(dockerfile, dockerfileSyntax); err != nil {
-		return "", err
-	}
-	return dockerfile.Name(), nil
-
-}
-
-func getDestroyFlags(opts *Options) []string {
-	var deployFlags []string
-
-	if opts.Name != "" {
-		deployFlags = append(deployFlags, fmt.Sprintf("--name \"%s\"", opts.Name))
-	}
-
-	if opts.Namespace != "" {
-		deployFlags = append(deployFlags, fmt.Sprintf("--namespace %s", opts.Namespace))
-	}
-
-	if opts.ManifestPathFlag != "" {
-		deployFlags = append(deployFlags, fmt.Sprintf("--file %s", opts.ManifestPathFlag))
-	}
-
-	if opts.DestroyVolumes {
-		deployFlags = append(deployFlags, "--volumes")
+func getCommandFlags(opts *Options) ([]string, error) {
+	commandFlags := []string{
+		fmt.Sprintf("--name \"%s\"", opts.Name),
 	}
 
 	if opts.ForceDestroy {
-		deployFlags = append(deployFlags, "--force-destroy")
+		commandFlags = append(commandFlags, "--force-destroy")
 	}
 
-	return deployFlags
-}
-
-func getOktetoCLIVersion(versionString string) string {
-	var version string
-	if match, err := regexp.MatchString(`\d+\.\d+\.\d+`, versionString); match {
-		version = fmt.Sprintf(constants.OktetoCLIImageForRemoteTemplate, versionString)
-	} else {
-		oktetoLog.Infof("invalid okteto CLI version %s: %s", versionString, err)
-		oktetoLog.Info("using latest okteto CLI image")
-		remoteOktetoImage := os.Getenv(constants.OktetoDeployRemoteImage)
-		if remoteOktetoImage != "" {
-			version = remoteOktetoImage
-		} else {
-			version = fmt.Sprintf(constants.OktetoCLIImageForRemoteTemplate, "latest")
+	if len(opts.Variables) > 0 {
+		var varsToAddForDeploy []string
+		variables, err := env.Parse(opts.Variables)
+		if err != nil {
+			return nil, err
 		}
+		for _, v := range variables {
+			varsToAddForDeploy = append(varsToAddForDeploy, fmt.Sprintf("--var %s=%q", v.Name, v.Value))
+		}
+		commandFlags = append(commandFlags, strings.Join(varsToAddForDeploy, " "))
 	}
 
-	return version
-}
-
-func fetchClusterMetadata(ctx context.Context) (*types.ClusterMetadata, error) {
-	cp := okteto.NewOktetoClientProvider()
-	c, err := cp.Provide()
-	if err != nil {
-		return nil, fmt.Errorf("failed to provide okteto client for fetching certs: %s", err)
-	}
-	uc := c.User()
-
-	metadata, err := uc.GetClusterMetadata(ctx, okteto.Context().Namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	if metadata.Certificate == nil {
-		metadata.Certificate, err = uc.GetClusterCertificate(ctx, okteto.Context().Name, okteto.Context().Namespace)
-	}
-
-	return &metadata, err
+	return commandFlags, nil
 }

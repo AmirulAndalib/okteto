@@ -14,7 +14,6 @@
 package doctor
 
 import (
-	"compress/flate"
 	"context"
 	"fmt"
 	"os"
@@ -22,17 +21,19 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/mholt/archiver/v3"
+	"github.com/mholt/archives"
 	"github.com/okteto/okteto/pkg/config"
+	"github.com/okteto/okteto/pkg/env"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/filesystem"
 	"github.com/okteto/okteto/pkg/k8s/apps"
 	"github.com/okteto/okteto/pkg/k8s/pods"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/model/forward"
 	"github.com/okteto/okteto/pkg/syncthing"
-	yaml "gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v2"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -45,14 +46,10 @@ type PodInfo struct {
 }
 
 // Run runs the "okteto status" sequence
-func Run(ctx context.Context, dev *model.Dev, devPath string, c *kubernetes.Clientset) (string, error) {
-	z := archiver.Zip{
-		CompressionLevel:       flate.DefaultCompression,
-		MkdirAll:               true,
-		SelectiveCompression:   true,
-		ContinueOnError:        true,
-		OverwriteExisting:      true,
-		ImplicitTopLevelFolder: true,
+func Run(ctx context.Context, dev *model.Dev, devPath string, namespace string, c *kubernetes.Clientset) (string, error) {
+	z := archives.Zip{
+		SelectiveCompression: true,
+		ContinueOnError:      true,
 	}
 
 	summaryFilename, err := generateSummaryFile()
@@ -69,7 +66,7 @@ func Run(ctx context.Context, dev *model.Dev, devPath string, c *kubernetes.Clie
 	}
 	defer os.RemoveAll(manifestPath)
 
-	podPath, err := generatePodFile(ctx, dev, c)
+	podPath, err := generatePodFile(ctx, dev, namespace, c)
 	if err != nil {
 		oktetoLog.Infof("failed to get information about the remote dev container: %s", err)
 		oktetoLog.Warning(oktetoErrors.ErrNotInDevMode.Error())
@@ -77,7 +74,7 @@ func Run(ctx context.Context, dev *model.Dev, devPath string, c *kubernetes.Clie
 		defer os.RemoveAll(podPath)
 	}
 
-	remoteLogsPath, err := generateRemoteSyncthingLogsFile(ctx, dev, c)
+	remoteLogsPath, err := generateRemoteSyncthingLogsFile(ctx, dev, namespace, c)
 	if err != nil {
 		oktetoLog.Infof("error getting remote syncthing logs: %s", err)
 	} else {
@@ -86,29 +83,49 @@ func Run(ctx context.Context, dev *model.Dev, devPath string, c *kubernetes.Clie
 
 	now := time.Now()
 	archiveName := fmt.Sprintf("okteto-doctor-%s.zip", now.Format("20060102150405"))
-	files := []string{summaryFilename}
-	files = append(files, stignoreFilenames...)
-
-	appLogsPath := filepath.Join(config.GetAppHome(dev.Namespace, dev.Name), "okteto.log")
-	if filesystem.FileExists(appLogsPath) {
-		files = append(files, appLogsPath)
+	files := map[string]string{summaryFilename: "okteto-summary.txt"}
+	for _, f := range stignoreFilenames {
+		files[f] = filepath.Base(f)
 	}
 
-	if filesystem.FileExists(syncthing.GetLogFile(dev.Namespace, dev.Name)) {
-		files = append(files, syncthing.GetLogFile(dev.Namespace, dev.Name))
+	appLogsPath := filepath.Join(config.GetAppHome(namespace, dev.Name), "okteto.log")
+	if filesystem.FileExists(appLogsPath) {
+		files[appLogsPath] = "okteto.log"
+	}
+
+	if filesystem.FileExists(syncthing.GetLogFile(namespace, dev.Name)) {
+		files[syncthing.GetLogFile(namespace, dev.Name)] = "syncthing.log"
 	}
 	if podPath != "" {
-		files = append(files, podPath)
+		files[podPath] = filepath.Base(podPath)
 	}
 	if manifestPath != "" {
-		files = append(files, manifestPath)
+		files[manifestPath] = filepath.Base(manifestPath)
 	}
 	if remoteLogsPath != "" {
-		files = append(files, remoteLogsPath)
+		files[remoteLogsPath] = filepath.Base(remoteLogsPath)
 	}
-	if err := z.Archive(files, archiveName); err != nil {
+
+	k8sLogsPath := io.GetK8sLoggerFilePath(config.GetOktetoHome())
+	if filesystem.FileExists(k8sLogsPath) {
+		files[k8sLogsPath] = "k8s.log"
+	}
+
+	archiveFiles, err := archives.FilesFromDisk(ctx, &archives.FromDiskOptions{}, files)
+	if err != nil {
+		oktetoLog.Infof("error while reading files from disk: %s", err)
+		return "", fmt.Errorf("couldn't create archive '%s', please try again: %w", archiveName, err)
+	}
+
+	file, err := os.OpenFile(archiveName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return "", fmt.Errorf("couldn't create archive '%s', please try again: %w", archiveName, err)
+	}
+	defer file.Close()
+
+	if err := z.Archive(ctx, file, archiveFiles); err != nil {
 		oktetoLog.Infof("error while archiving: %s", err)
-		return "", fmt.Errorf("couldn't create archive '%s', please try again: %s", archiveName, err)
+		return "", fmt.Errorf("couldn't create archive '%s', please try again: %w", archiveName, err)
 	}
 
 	return archiveName, nil
@@ -117,7 +134,7 @@ func Run(ctx context.Context, dev *model.Dev, devPath string, c *kubernetes.Clie
 func generateSummaryFile() (string, error) {
 	tempdir, err := os.MkdirTemp("", "")
 	if err != nil {
-		return "", fmt.Errorf("error creating temp dir: %s", err)
+		return "", fmt.Errorf("error creating temp dir: %w", err)
 	}
 	summaryPath := filepath.Join(tempdir, "okteto-summary.txt")
 	fileSummary, err := os.OpenFile(summaryPath, os.O_RDWR|os.O_CREATE, 0600)
@@ -174,9 +191,8 @@ func generateManifestFile(devPath string) (string, error) {
 	}
 
 	dev := &model.Dev{
-		Image:       &model.BuildInfo{},
-		Push:        &model.BuildInfo{},
-		Environment: make([]model.EnvVar, 0),
+		Image:       "",
+		Environment: make([]env.Var, 0),
 		Secrets:     make([]model.Secret, 0),
 		Forward:     make([]forward.Forward, 0),
 		Volumes:     make([]model.Volume, 0),
@@ -192,24 +208,8 @@ func generateManifestFile(devPath string) (string, error) {
 
 	dev.Environment = nil
 
-	if dev.Image != nil {
-		dev.Image.Args = nil
-	}
-
-	if dev.Push != nil {
-		dev.Push.Args = nil
-	}
-
 	for i := range dev.Services {
 		dev.Services[i].Environment = nil
-
-		if dev.Services[i].Image != nil {
-			dev.Services[i].Image.Args = nil
-		}
-
-		if dev.Services[i].Push != nil {
-			dev.Services[i].Push.Args = nil
-		}
 	}
 
 	marshalled, err := yaml.Marshal(dev)
@@ -223,8 +223,8 @@ func generateManifestFile(devPath string) (string, error) {
 	return manifestFilename, nil
 }
 
-func generatePodFile(ctx context.Context, dev *model.Dev, c *kubernetes.Clientset) (string, error) {
-	app, err := apps.Get(ctx, dev, dev.Namespace, c)
+func generatePodFile(ctx context.Context, dev *model.Dev, namespace string, c *kubernetes.Clientset) (string, error) {
+	app, err := apps.Get(ctx, dev, namespace, c)
 	if err != nil {
 		return "", err
 	}
@@ -284,8 +284,8 @@ func generatePodFile(ctx context.Context, dev *model.Dev, c *kubernetes.Clientse
 	return podFilename, nil
 }
 
-func generateRemoteSyncthingLogsFile(ctx context.Context, dev *model.Dev, c *kubernetes.Clientset) (string, error) {
-	app, err := apps.Get(ctx, dev, dev.Namespace, c)
+func generateRemoteSyncthingLogsFile(ctx context.Context, dev *model.Dev, namespace string, c *kubernetes.Clientset) (string, error) {
+	app, err := apps.Get(ctx, dev, namespace, c)
 	if err != nil {
 		return "", err
 	}
@@ -294,14 +294,14 @@ func generateRemoteSyncthingLogsFile(ctx context.Context, dev *model.Dev, c *kub
 		return "", err
 	}
 
-	remoteLogs, err := pods.ContainerLogs(ctx, dev.Container, pod.Name, dev.Namespace, false, c)
+	remoteLogs, err := pods.ContainerLogs(ctx, dev.Container, pod.Name, namespace, false, c)
 	if err != nil {
 		return "", err
 	}
 
 	tempdir, err := os.MkdirTemp("", "")
 	if err != nil {
-		return "", fmt.Errorf("error creating temp dir: %s", err)
+		return "", fmt.Errorf("error creating temp dir: %w", err)
 	}
 	remoteLogsPath := filepath.Join(tempdir, "remote-syncthing.log")
 	fileRemoteLog, err := os.OpenFile(remoteLogsPath, os.O_RDWR|os.O_CREATE, 0600)

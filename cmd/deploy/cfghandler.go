@@ -15,73 +15,61 @@ package deploy
 
 import (
 	"context"
+	"time"
 
-	"github.com/okteto/okteto/cmd/utils"
 	"github.com/okteto/okteto/pkg/cmd/pipeline"
-	"github.com/okteto/okteto/pkg/constants"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/okteto"
 	apiv1 "k8s.io/api/core/v1"
 )
 
-// configMapHandler defines the different functions to run okteto inside an okteto deploy
+// ConfigMapHandler defines the different functions to run okteto inside an okteto deploy
 // or an okteto destroy directly
-type configMapHandler interface {
-	translateConfigMapAndDeploy(context.Context, *pipeline.CfgData) (*apiv1.ConfigMap, error)
-	updateConfigMap(context.Context, *apiv1.ConfigMap, *pipeline.CfgData, error) error
-	updateEnvsFromCommands(context.Context, string, string, []string) error
-	getConfigmapVariablesEncoded(ctx context.Context, name, namespace string) (string, error)
-}
-
-// deployInsideDeployConfigMapHandler is the runner used when the okteto is executed
-// inside an okteto deploy command
-type deployInsideDeployConfigMapHandler struct {
-	k8sClientProvider okteto.K8sClientProvider
-}
-
-func newDeployInsideDeployConfigMapHandler(provider okteto.K8sClientProvider) *deployInsideDeployConfigMapHandler {
-	return &deployInsideDeployConfigMapHandler{
-		k8sClientProvider: provider,
-	}
+type ConfigMapHandler interface {
+	TranslateConfigMapAndDeploy(context.Context, *pipeline.CfgData) (*apiv1.ConfigMap, error)
+	UpdateConfigMap(context.Context, *apiv1.ConfigMap, *pipeline.CfgData, error) error
+	UpdateEnvsFromCommands(context.Context, string, string, []string) error
+	GetConfigmapVariablesEncoded(ctx context.Context, name, namespace string) (string, error)
+	AddPhaseDuration(context.Context, string, string, string, time.Duration) error
 }
 
 // oktetoDefaultConfigMapHandler is the runner used when the okteto is executed
 // directly
 type defaultConfigMapHandler struct {
-	k8sClientProvider okteto.K8sClientProvider
+	k8sClientProvider okteto.K8sClientProviderWithLogger
+	k8slogger         *io.K8sLogger
 }
 
-func newDefaultConfigMapHandler(provider okteto.K8sClientProvider) *defaultConfigMapHandler {
+func newDefaultConfigMapHandler(provider okteto.K8sClientProviderWithLogger, k8slogger *io.K8sLogger) *defaultConfigMapHandler {
 	return &defaultConfigMapHandler{
 		k8sClientProvider: provider,
+		k8slogger:         k8slogger,
 	}
 }
 
-func NewConfigmapHandler(provider okteto.K8sClientProvider) configMapHandler {
-	if utils.LoadBoolean(constants.OktetoDeployRemote) {
-		return newDeployInsideDeployConfigMapHandler(provider)
-	}
-	return newDefaultConfigMapHandler(provider)
+func NewConfigmapHandler(provider okteto.K8sClientProviderWithLogger, k8slogger *io.K8sLogger) ConfigMapHandler {
+	return newDefaultConfigMapHandler(provider, k8slogger)
 }
 
-func (ch *defaultConfigMapHandler) translateConfigMapAndDeploy(ctx context.Context, data *pipeline.CfgData) (*apiv1.ConfigMap, error) {
-	c, _, err := ch.k8sClientProvider.Provide(okteto.Context().Cfg)
+func (ch *defaultConfigMapHandler) TranslateConfigMapAndDeploy(ctx context.Context, data *pipeline.CfgData) (*apiv1.ConfigMap, error) {
+	c, _, err := ch.k8sClientProvider.ProvideWithLogger(okteto.GetContext().Cfg, ch.k8slogger)
 	if err != nil {
 		return nil, err
 	}
 	return pipeline.TranslateConfigMapAndDeploy(ctx, data, c)
 }
 
-func (ch *defaultConfigMapHandler) getConfigmapVariablesEncoded(ctx context.Context, name, namespace string) (string, error) {
-	c, _, err := ch.k8sClientProvider.Provide(okteto.Context().Cfg)
+func (ch *defaultConfigMapHandler) GetConfigmapVariablesEncoded(ctx context.Context, name, namespace string) (string, error) {
+	c, _, err := ch.k8sClientProvider.ProvideWithLogger(okteto.GetContext().Cfg, ch.k8slogger)
 	if err != nil {
 		return "", err
 	}
 	return pipeline.GetConfigmapVariablesEncoded(ctx, name, namespace, c)
 }
 
-func (ch *defaultConfigMapHandler) updateConfigMap(ctx context.Context, cfg *apiv1.ConfigMap, data *pipeline.CfgData, errMain error) error {
-	c, _, err := ch.k8sClientProvider.Provide(okteto.Context().Cfg)
+func (ch *defaultConfigMapHandler) UpdateConfigMap(ctx context.Context, cfg *apiv1.ConfigMap, data *pipeline.CfgData, errMain error) error {
+	c, _, err := ch.k8sClientProvider.ProvideWithLogger(okteto.GetContext().Cfg, ch.k8slogger)
 	if err != nil {
 		return err
 	}
@@ -95,9 +83,9 @@ func (ch *defaultConfigMapHandler) updateConfigMap(ctx context.Context, cfg *api
 	return errMain
 }
 
-// updateEnvsFromCommands update config map by adding envs generated in OKTETO_ENV as data fields
-func (h *defaultConfigMapHandler) updateEnvsFromCommands(ctx context.Context, name, namespace string, envs []string) error {
-	c, _, err := h.k8sClientProvider.Provide(okteto.Context().Cfg)
+// UpdateEnvsFromCommands update config map by adding envs generated in OKTETO_ENV as data fields
+func (ch *defaultConfigMapHandler) UpdateEnvsFromCommands(ctx context.Context, name, namespace string, envs []string) error {
+	c, _, err := ch.k8sClientProvider.ProvideWithLogger(okteto.GetContext().Cfg, ch.k8slogger)
 	if err != nil {
 		return err
 	}
@@ -108,31 +96,10 @@ func (h *defaultConfigMapHandler) updateEnvsFromCommands(ctx context.Context, na
 	return nil
 }
 
-// translateConfigMapAndDeploy with the receiver deployInsideDeployConfigMapHandler doesn't do anything
-// because we have to  control the cfmap in the main execution. If both handled the configmap we will be
-// overwritten the cfmap and leave it in a inconsistent status
-func (*deployInsideDeployConfigMapHandler) translateConfigMapAndDeploy(_ context.Context, _ *pipeline.CfgData) (*apiv1.ConfigMap, error) {
-	return nil, nil
-}
-
-func (ch *deployInsideDeployConfigMapHandler) getConfigmapVariablesEncoded(ctx context.Context, name, namespace string) (string, error) {
-	c, _, err := ch.k8sClientProvider.Provide(okteto.Context().Cfg)
+func (ch *defaultConfigMapHandler) AddPhaseDuration(ctx context.Context, name, namespace, phase string, duration time.Duration) error {
+	c, _, err := ch.k8sClientProvider.ProvideWithLogger(okteto.GetContext().Cfg, ch.k8slogger)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return pipeline.GetConfigmapVariablesEncoded(ctx, name, namespace, c)
-}
-
-// updateConfigMap with the receiver deployInsideDeployConfigMapHandler doesn't do anything
-// because we have to  control the cfmap in the main execution. If both handled the configmap we will be
-// overwritten the cfmap and leave it in a inconsistent status
-func (*deployInsideDeployConfigMapHandler) updateConfigMap(_ context.Context, _ *apiv1.ConfigMap, _ *pipeline.CfgData, err error) error {
-	return nil
-}
-
-// updateEnvs with the receiver deployInsideDeployConfigMapHandler doesn't do anything
-// because we have to  control the cfmap in the main execution. If both handled the configmap we will be
-// overwritten the cfmap and leave it in a inconsistent status
-func (*deployInsideDeployConfigMapHandler) updateEnvsFromCommands(_ context.Context, _ string, _ string, _ []string) error {
-	return nil
+	return pipeline.AddPhaseDuration(ctx, name, namespace, phase, duration, c)
 }

@@ -34,8 +34,8 @@ import (
 )
 
 type fakeTLSConn struct {
-	handshake    bool
 	handshakeErr error
+	handshake    bool
 }
 
 func (c *fakeTLSConn) Handshake() error {
@@ -64,14 +64,14 @@ func (*fakeTLSConn) SetWriteDeadline(time.Time) error {
 }
 
 type fakeTLSDialArgs struct {
+	config  *tls.Config
 	network string
 	addr    string
-	config  *tls.Config
 }
 
 type fakeTLSDial struct {
-	requests []fakeTLSDialArgs
 	err      error
+	requests []fakeTLSDialArgs
 	mtx      sync.RWMutex
 }
 
@@ -93,8 +93,8 @@ type fakeClient struct {
 
 // GetDigest has everything needed to mock a getDigest API call
 type getDigest struct {
-	Result string
 	Err    error
+	Result string
 }
 
 // GetConfig has everything needed to mock a getConfig API call
@@ -113,8 +113,8 @@ type mockWrite struct {
 }
 
 type hasPushAccess struct {
-	Result bool
 	Err    error
+	Result bool
 }
 
 func (fc fakeClient) GetDigest(_ string) (string, error) {
@@ -138,25 +138,29 @@ func (fc fakeClient) Write(_ name.Reference, _ containerv1.Image) error {
 }
 
 type fakeClientConfig struct {
+	err                         error
+	cert                        *x509.Certificate
+	externalRegistryCredentials [2]string
 	registryURL                 string
 	userID                      string
 	token                       string
-	isInsecure                  bool
-	cert                        *x509.Certificate
 	serverName                  string
 	contextName                 string
-	externalRegistryCredentials [2]string
+	isInsecure                  bool
 }
 
 func (f fakeClientConfig) GetRegistryURL() string                            { return f.registryURL }
 func (f fakeClientConfig) GetUserID() string                                 { return f.userID }
 func (f fakeClientConfig) GetToken() string                                  { return f.token }
 func (f fakeClientConfig) IsInsecureSkipTLSVerifyPolicy() bool               { return f.isInsecure }
-func (f fakeClientConfig) GetContextCertificate() (*x509.Certificate, error) { return f.cert, nil }
+func (f fakeClientConfig) GetContextCertificate() (*x509.Certificate, error) { return f.cert, f.err }
 func (f fakeClientConfig) GetServerNameOverride() string                     { return f.serverName }
 func (f fakeClientConfig) GetContextName() string                            { return f.contextName }
 func (f fakeClientConfig) GetExternalRegistryCredentials(_ string) (string, string, error) {
-	return f.externalRegistryCredentials[0], f.externalRegistryCredentials[1], nil
+	return f.externalRegistryCredentials[0], f.externalRegistryCredentials[1], f.err
+}
+func (f fakeClientConfig) GetExternalRegistryCredentialsStateless(_ string) (string, string, error) {
+	return f.externalRegistryCredentials[0], f.externalRegistryCredentials[1], f.err
 }
 
 func TestGetDigest(t *testing.T) {
@@ -169,22 +173,22 @@ func TestGetDigest(t *testing.T) {
 	}
 
 	type input struct {
-		config fakeClientConfig
 		image  string
+		config fakeClientConfig
 	}
 	type getConfig struct {
 		descriptor *remote.Descriptor
 		err        error
 	}
 	type expected struct {
-		image string
 		err   error
+		image string
 	}
 	var tests = []struct {
-		name      string
-		input     input
 		getConfig getConfig
 		expected  expected
+		name      string
+		input     input
 	}{
 		{
 			name: "no error",
@@ -267,8 +271,8 @@ func TestGetDigest(t *testing.T) {
 
 func TestGetOptions(t *testing.T) {
 	type input struct {
-		config fakeClientConfig
 		image  string
+		config fakeClientConfig
 	}
 	var tests = []struct {
 		name     string
@@ -465,8 +469,8 @@ func TestGetTransport(t *testing.T) {
 
 func Test_GetDescriptor(t *testing.T) {
 	type input struct {
-		config fakeClientConfig
 		image  string
+		config fakeClientConfig
 	}
 	type getConfig struct {
 		descriptor *remote.Descriptor
@@ -477,10 +481,10 @@ func Test_GetDescriptor(t *testing.T) {
 		err        error
 	}
 	var tests = []struct {
-		name      string
-		input     input
 		expected  expected
 		getConfig getConfig
+		name      string
+		input     input
 	}{
 		{
 			name: "failed to parse reference",
@@ -508,6 +512,29 @@ func Test_GetDescriptor(t *testing.T) {
 			getConfig: getConfig{
 				descriptor: nil,
 				err:        oktetoErrors.ErrNotFound,
+			},
+		},
+		{
+			name: "not found for being invalid",
+			input: input{
+				image: "okteto/test:latest",
+			},
+			expected: expected{
+				descriptor: nil,
+				err: oktetoErrors.UserError{
+					E:    fmt.Errorf("malformed image digest"),
+					Hint: "Image 'okteto/test:latest' seems malformed. Please run 'okteto build --no-cache' to rebuild your image",
+				},
+			},
+			getConfig: getConfig{
+				descriptor: nil,
+				err: &transport.Error{
+					Errors: []transport.Diagnostic{
+						{
+							Code: manifestUnknownForBeingInvalidErrorCode,
+						},
+					},
+				},
 			},
 		},
 	}
@@ -543,11 +570,11 @@ func Test_Write(t *testing.T) {
 		err error
 	}
 	var tests = []struct {
-		name        string
 		input       input
 		expected    expected
-		client      fakeClient
 		writeConfig writeConfig
+		client      fakeClient
+		name        string
 	}{
 		{
 			name: "failed to write",

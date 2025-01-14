@@ -44,20 +44,17 @@ var (
 
 // TTYCollapseDisplayer displays with a screenbuff
 type TTYCollapseDisplayer struct {
-	stdoutScanner *bufio.Scanner
-	stderrScanner *bufio.Scanner
-	screenbuf     *screenbuf.ScreenBuf
-
-	command        string
-	err            error
-	linesToDisplay []string
-	numberOfLines  int
-
-	commandContext context.Context
-	cancel         context.CancelFunc
-
-	isBuilding            bool
+	err                   error
+	commandContext        context.Context
+	stdoutScanner         *bufio.Scanner
+	stderrScanner         *bufio.Scanner
+	screenbuf             *screenbuf.ScreenBuf
+	cancel                context.CancelFunc
+	command               string
+	linesToDisplay        []string
+	numberOfLines         int
 	buildingpreviousLines int
+	isBuilding            bool
 }
 
 // Display displays a
@@ -237,7 +234,7 @@ func (d *TTYCollapseDisplayer) CleanUp(err error) {
 		}
 		lines := renderLines(d.linesToDisplay, width)
 		for _, line := range lines {
-			if _, err := d.screenbuf.Write([]byte(line)); err != nil {
+			if _, err := d.screenbuf.Write(line); err != nil {
 				oktetoLog.Infof("Error writing line: %s", err)
 			}
 		}

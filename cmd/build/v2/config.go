@@ -14,20 +14,24 @@
 package v2
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"strings"
+	"os"
+	"strconv"
 
 	oktetoLog "github.com/okteto/okteto/pkg/log"
-	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/spf13/afero"
+)
+
+const (
+	// OktetoEnableSmartBuildEnvVar represents whether the feature flag to enable smart builds is enabled or not
+	OktetoEnableSmartBuildEnvVar = "OKTETO_SMART_BUILDS_ENABLED"
 )
 
 type configRepositoryInterface interface {
 	GetSHA() (string, error)
 	IsClean() (bool, error)
+	GetAnonymizedRepo() string
+	GetLatestDirSHA(string) (string, error)
 }
 
 type configRegistryInterface interface {
@@ -35,30 +39,74 @@ type configRegistryInterface interface {
 }
 
 type oktetoBuilderConfig struct {
-	hasGlobalAccess bool
-	isCleanProject  bool
-	repository      configRepositoryInterface
-	fs              afero.Fs
-	isOkteto        bool
+	repository          configRepositoryInterface
+	fs                  afero.Fs
+	hasGlobalAccess     bool
+	isCleanProject      bool
+	isOkteto            bool
+	isSmartBuildsEnable bool
 }
 
-func getConfig(registry configRegistryInterface, gitRepo configRepositoryInterface) oktetoBuilderConfig {
+type loggerInfo interface {
+	Infof(format string, args ...interface{})
+}
+
+func getConfig(registry configRegistryInterface, gitRepo configRepositoryInterface, l loggerInfo) oktetoBuilderConfig {
 	hasAccess, err := registry.HasGlobalPushAccess()
 	if err != nil {
-		oktetoLog.Infof("error trying to access globalPushAccess: %w", err)
+		l.Infof("error trying to access globalPushAccess: %s", err)
 	}
 
 	isClean, err := gitRepo.IsClean()
 	if err != nil {
-		oktetoLog.Infof("error trying to get directory: %w", err)
+		l.Infof("error trying to get directory: %s", err)
 	}
+
 	return oktetoBuilderConfig{
-		repository:      gitRepo,
-		hasGlobalAccess: hasAccess,
-		isCleanProject:  isClean,
-		fs:              afero.NewOsFs(),
-		isOkteto:        okteto.Context().IsOkteto,
+		repository:          gitRepo,
+		hasGlobalAccess:     hasAccess,
+		isCleanProject:      isClean,
+		fs:                  afero.NewOsFs(),
+		isOkteto:            okteto.IsOkteto(),
+		isSmartBuildsEnable: getIsSmartBuildEnabled(),
 	}
+}
+
+func getConfigStateless(registry configRegistryInterface, gitRepo configRepositoryInterface, l loggerInfo, isOkteto bool) oktetoBuilderConfig {
+	hasAccess, err := registry.HasGlobalPushAccess()
+	if err != nil {
+		l.Infof("error trying to access globalPushAccess: %s", err)
+	}
+
+	isClean, err := gitRepo.IsClean()
+	if err != nil {
+		l.Infof("error trying to get directory: %s", err)
+	}
+
+	return oktetoBuilderConfig{
+		repository:          gitRepo,
+		hasGlobalAccess:     hasAccess,
+		isCleanProject:      isClean,
+		fs:                  afero.NewOsFs(),
+		isOkteto:            isOkteto,
+		isSmartBuildsEnable: getIsSmartBuildEnabled(),
+	}
+}
+
+func getIsSmartBuildEnabled() bool {
+	enableSmartBuilds := true
+	enableSmartBuildsStr := os.Getenv(OktetoEnableSmartBuildEnvVar)
+	if enableSmartBuildsStr != "" {
+		smartBuildEnabledBool, err := strconv.ParseBool(enableSmartBuildsStr)
+		if err != nil {
+			oktetoLog.Warning("feature flag %s received an invalid value; expected boolean. Smart builds will remain enabled by default", OktetoEnableSmartBuildEnvVar)
+		} else {
+			enableSmartBuilds = smartBuildEnabledBool
+		}
+
+	}
+
+	return enableSmartBuilds
 }
 
 // IsOkteto checks if the context is an okteto managed context
@@ -80,43 +128,16 @@ func (oc oktetoBuilderConfig) IsCleanProject() bool {
 func (oc oktetoBuilderConfig) GetGitCommit() string {
 	commitSHA, err := oc.repository.GetSHA()
 	if err != nil {
-		oktetoLog.Infof("could not get repository sha: %w", err)
+		oktetoLog.Infof("could not get repository sha: %s", err)
 	}
 	return commitSHA
 }
 
-// GetBuildHash returns a sha hash of the build info and the commit sha
-func (oc oktetoBuilderConfig) GetBuildHash(buildInfo *model.BuildInfo) string {
-	commitSHA, err := oc.repository.GetSHA()
-	if err != nil {
-		return ""
-	}
-	text := oc.getTextToHash(buildInfo, commitSHA)
-	buildHash := sha256.Sum256([]byte(text))
-	return hex.EncodeToString(buildHash[:])
+// GetAnonymizedRepo returns the repository url without credentials
+func (oc oktetoBuilderConfig) GetAnonymizedRepo() string {
+	return oc.repository.GetAnonymizedRepo()
 }
 
-func (oc oktetoBuilderConfig) getTextToHash(buildInfo *model.BuildInfo, sha string) string {
-	args := []string{}
-	for _, arg := range buildInfo.Args {
-		args = append(args, arg.String())
-	}
-	argsText := strings.Join(args, ";")
-
-	secrets := []string{}
-	for key, value := range buildInfo.Secrets {
-		secrets = append(secrets, fmt.Sprintf("%s=%s", key, value))
-	}
-	secretsText := strings.Join(secrets, ";")
-
-	// We use a builder to avoid allocations when building the string
-	var b strings.Builder
-	fmt.Fprintf(&b, "commit:%s;", sha)
-	fmt.Fprintf(&b, "target:%s;", buildInfo.Target)
-	fmt.Fprintf(&b, "build_args:%s;", argsText)
-	fmt.Fprintf(&b, "secrets:%s;", secretsText)
-	fmt.Fprintf(&b, "context:%s;", buildInfo.Context)
-	fmt.Fprintf(&b, "dockerfile:%s;", buildInfo.Dockerfile)
-	fmt.Fprintf(&b, "image:%s;", buildInfo.Image)
-	return b.String()
+func (oc oktetoBuilderConfig) IsSmartBuildsEnabled() bool {
+	return oc.isSmartBuildsEnable
 }

@@ -45,9 +45,6 @@ const (
 	// OktetoFolderEnvVar defines the path of okteto folder
 	OktetoFolderEnvVar = "OKTETO_FOLDER"
 
-	// OktetoAutodiscoveryReleaseName defines the name used for helm release when autodiscovery
-	OktetoAutodiscoveryReleaseName = "OKTETO_AUTODISCOVERY_RELEASE_NAME"
-
 	// LastUpdatedAnnotation indicates update timestamp
 	LastUpdatedAnnotation = "dev.okteto.com/last-updated"
 
@@ -66,14 +63,8 @@ const (
 	// OktetoInternalServerNameEnvVar defines the internal server name for --remote
 	OktetoInternalServerNameEnvVar = "INTERNAL_SERVER_NAME"
 
-	// OktetoInvalidateCacheEnvVar defines a ramdom number to invalidate the "--remote" cache
+	// OktetoInvalidateCacheEnvVar defines a random number to invalidate the "--remote" cache
 	OktetoInvalidateCacheEnvVar = "OKTETO_INVALIDATE_CACHE"
-
-	// OktetoDeployRemoteImage defines okteto cli image used for deploy an environment remotely
-	OktetoDeployRemoteImage = "OKTETO_REMOTE_CLI_IMAGE"
-
-	// OktetoCLIImageForRemoteTemplate defines okteto CLI image template to use for remote deployments
-	OktetoCLIImageForRemoteTemplate = "okteto/okteto:%s"
 
 	// OktetoPipelineRunnerImage defines image to use for remote deployments if empty
 	OktetoPipelineRunnerImage = "okteto/pipeline-runner:1.0.2"
@@ -105,8 +96,8 @@ const (
 	// OktetoNamespaceLabel is the label used to identify the namespace where the resource lives
 	OktetoNamespaceLabel = "dev.okteto.com/namespace"
 
-	// OktetoDivertWeaverDriver is the divert driver for weaver
-	OktetoDivertWeaverDriver = "weaver"
+	// OktetoDivertNginxDriver is the divert driver for nginx
+	OktetoDivertNginxDriver = "nginx"
 
 	// OktetoDivertIstioDriver is the divert driver for istio
 	OktetoDivertIstioDriver = "istio"
@@ -123,18 +114,36 @@ const (
 	// OktetoDeprecatedDivertAnnotationTemplate annotation for the okteto mutation webhook to divert a virtual service
 	OktetoDeprecatedDivertAnnotationTemplate = "divert.okteto.com/%s-%s"
 
-	//OktetoHybridModeFieldValue represents the hybrid mode field value
+	// OktetoHybridModeFieldValue represents the hybrid mode field value
 	OktetoHybridModeFieldValue = "hybrid"
 
 	// OktetoSyncModeFieldValue represents the sync mode field value
 	OktetoSyncModeFieldValue = "sync"
 
-	//OktetoConfigMapVariablesField represents the field name related to variables seetion in config map
+	// OktetoConfigMapVariablesField represents the field name related to variables seetion in config map
 	OktetoConfigMapVariablesField = "variables"
 
-	//OktetoDependencyEnvsKey the key on the conqfig map that will store OKTETO_ENV values
+	// OktetoDependencyEnvsKey the key on the conqfig map that will store OKTETO_ENV values
 	OktetoDependencyEnvsKey = "dependencyEnvs"
 
 	// EnvironmentLabelKeyPrefix represents the prefix for the preview and pipeline labels
 	EnvironmentLabelKeyPrefix = "label.okteto.com"
+
+	// OktetoDeployableEnvVar Env variable containing the piece of Okteto manifest which is deployable in remote or local deploys
+	OktetoDeployableEnvVar = "OKTETO_DEPLOYABLE"
+
+	// OktetoIsPreviewEnvVar Env variable containing a boolean indicating if the environment is a preview environment
+	OktetoIsPreviewEnvVar = "OKTETO_IS_PREVIEW_ENVIRONMENT"
+
+	// CIEnvVar Env variable defines if the environment is a CI environment
+	CIEnvVar = "CI"
+
+	// OktetoSshAgentHostnameEnvVar Env variable defining the hostname where the SSH Agent is listening
+	OktetoSshAgentHostnameEnvVar = "OKTETO_SSH_AGENT_HOSTNAME"
+
+	// OktetoSshAgentPortEnvVar Env variable defining the port where the SSH Agent is listening
+	OktetoSshAgentPortEnvVar = "OKTETO_SSH_AGENT_PORT"
+
+	// OktetoSshAgentSocketEnvVar Env variable defining the socket where the ssh-forwarder will listen
+	OktetoSshAgentSocketEnvVar = "OKTETO_SSH_AGENT_SOCKET"
 )

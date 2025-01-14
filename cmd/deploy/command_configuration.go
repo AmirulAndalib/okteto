@@ -17,17 +17,18 @@ import (
 	"context"
 	"net/url"
 	"os"
-	"reflect"
 
+	giturls "github.com/chainguard-dev/git-urls"
 	"github.com/okteto/okteto/cmd/utils"
 	"github.com/okteto/okteto/pkg/cmd/stack"
 	"github.com/okteto/okteto/pkg/constants"
 	"github.com/okteto/okteto/pkg/devenvironment"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	ioCtrl "github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/model"
+	modelUtils "github.com/okteto/okteto/pkg/model/utils"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/okteto/okteto/pkg/repository"
-	giturls "github.com/whilp/git-urls"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -37,27 +38,37 @@ const (
 	httpsScheme = "https"
 )
 
-func setDeployOptionsValuesFromManifest(ctx context.Context, deployOptions *Options, cwd string, c kubernetes.Interface) error {
+type Namer struct {
+	Workdir      string
+	KubeClient   kubernetes.Interface
+	ManifestName string
+	ManifestPath string
+}
 
-	if deployOptions.Manifest.Context == "" {
-		deployOptions.Manifest.Context = okteto.Context().Name
+func (na Namer) ResolveName(ctx context.Context) string {
+	if na.ManifestName != "" {
+		return na.ManifestName
 	}
-	if deployOptions.Manifest.Namespace == "" {
-		deployOptions.Manifest.Namespace = okteto.Context().Namespace
-	}
+	inferer := devenvironment.NewNameInferer(na.KubeClient)
+	return inferer.InferName(ctx, na.Workdir, okteto.GetContext().Namespace, na.ManifestPath)
+}
 
+func setDeployOptionsValuesFromManifest(ctx context.Context, deployOptions *Options, cwd string, c kubernetes.Interface, k8sLogger *ioCtrl.K8sLogger) error {
 	if deployOptions.Name == "" {
-		if deployOptions.Manifest.Name != "" {
-			deployOptions.Name = deployOptions.Manifest.Name
-		} else {
-			c, _, err := okteto.NewK8sClientProvider().Provide(okteto.Context().Cfg)
-			if err != nil {
-				return err
-			}
-			inferer := devenvironment.NewNameInferer(c)
-			deployOptions.Name = inferer.InferName(ctx, cwd, okteto.Context().Namespace, deployOptions.ManifestPathFlag)
-			deployOptions.Manifest.Name = deployOptions.Name
+		c, _, err := okteto.NewK8sClientProviderWithLogger(k8sLogger).Provide(okteto.GetContext().Cfg)
+		if err != nil {
+			return err
 		}
+
+		n := Namer{
+			Workdir:      cwd,
+			KubeClient:   c,
+			ManifestName: deployOptions.Manifest.Name,
+			ManifestPath: deployOptions.ManifestPathFlag,
+		}
+		name := n.ResolveName(ctx)
+		deployOptions.Name = name
+		deployOptions.Manifest.Name = name
 
 	} else {
 		if deployOptions.Manifest != nil {
@@ -69,56 +80,45 @@ func setDeployOptionsValuesFromManifest(ctx context.Context, deployOptions *Opti
 			deployOptions.Manifest.Deploy.ComposeSection.Stack.Name = deployOptions.Name
 		}
 	}
-
-	if deployOptions.Manifest.Deploy != nil && deployOptions.Manifest.Deploy.ComposeSection != nil && deployOptions.Manifest.Deploy.ComposeSection.Stack != nil {
-
-		mergeServicesToDeployFromOptionsAndManifest(deployOptions)
-		if len(deployOptions.servicesToDeploy) == 0 {
-			deployOptions.servicesToDeploy = []string{}
-			for service := range deployOptions.Manifest.Deploy.ComposeSection.Stack.Services {
-				deployOptions.servicesToDeploy = append(deployOptions.servicesToDeploy, service)
-			}
+	if deployOptions.Manifest.Deploy != nil && deployOptions.Manifest.Deploy.ComposeSection != nil {
+		svcs, err := getStackServicesToDeploy(ctx, deployOptions.Manifest.Deploy.ComposeSection, c)
+		if err != nil {
+			return err
 		}
-		if len(deployOptions.Manifest.Deploy.ComposeSection.ComposesInfo) > 0 {
-			if err := stack.ValidateDefinedServices(deployOptions.Manifest.Deploy.ComposeSection.Stack, deployOptions.servicesToDeploy); err != nil {
-				return err
-			}
-			deployOptions.servicesToDeploy = stack.AddDependentServicesIfNotPresent(ctx, deployOptions.Manifest.Deploy.ComposeSection.Stack, deployOptions.servicesToDeploy, c)
-			deployOptions.Manifest.Deploy.ComposeSection.ComposesInfo[0].ServicesToDeploy = deployOptions.servicesToDeploy
-		}
+		deployOptions.StackServicesToDeploy = svcs
 	}
 	return nil
 }
 
-func mergeServicesToDeployFromOptionsAndManifest(deployOptions *Options) {
-	var manifestDeclaredServicesToDeploy []string
-	for _, composeInfo := range deployOptions.Manifest.Deploy.ComposeSection.ComposesInfo {
-		manifestDeclaredServicesToDeploy = append(manifestDeclaredServicesToDeploy, composeInfo.ServicesToDeploy...)
+func getStackServicesToDeploy(ctx context.Context, composeSectionInfo *model.ComposeSectionInfo, c kubernetes.Interface) ([]string, error) {
+	svcs := []string{}
+
+	servicesToDeploy := 0
+	for _, composeInfo := range composeSectionInfo.ComposesInfo {
+		svcs = append(svcs, composeInfo.ServicesToDeploy...)
+		servicesToDeploy += len(composeInfo.ServicesToDeploy)
+	}
+	if servicesToDeploy == 0 {
+		svcs = []string{}
+		if composeSectionInfo.Stack == nil {
+			oktetoLog.Info("There is no stack defined in the manifest")
+			return svcs, nil
+		}
+		for service := range composeSectionInfo.Stack.Services {
+			svcs = append(svcs, service)
+		}
+		return svcs, nil
 	}
 
-	manifestDeclaredServicesToDeploySet := map[string]bool{}
-	for _, service := range manifestDeclaredServicesToDeploy {
-		manifestDeclaredServicesToDeploySet[service] = true
+	if err := stack.ValidateDefinedServices(composeSectionInfo.Stack, svcs); err != nil {
+		return []string{}, err
 	}
+	svcs = stack.AddDependentServicesIfNotPresent(ctx, composeSectionInfo.Stack, svcs, c)
 
-	commandDeclaredServicesToDeploy := map[string]bool{}
-	for _, service := range deployOptions.servicesToDeploy {
-		commandDeclaredServicesToDeploy[service] = true
-	}
-
-	if reflect.DeepEqual(manifestDeclaredServicesToDeploySet, commandDeclaredServicesToDeploy) {
-		return
-	}
-
-	if len(deployOptions.servicesToDeploy) > 0 && len(manifestDeclaredServicesToDeploy) > 0 {
-		oktetoLog.Warning("overwriting manifest's `services to deploy` with command line arguments")
-	}
-	if len(deployOptions.servicesToDeploy) == 0 && len(manifestDeclaredServicesToDeploy) > 0 {
-		deployOptions.servicesToDeploy = manifestDeclaredServicesToDeploy
-	}
+	return svcs, nil
 }
 
-func (dc *DeployCommand) addEnvVars(cwd string) {
+func (dc *Command) addEnvVars(cwd string) {
 	if os.Getenv(constants.OktetoGitBranchEnvVar) == "" {
 		branch, err := utils.GetBranch(cwd)
 		if err != nil {
@@ -128,7 +128,7 @@ func (dc *DeployCommand) addEnvVars(cwd string) {
 	}
 
 	if os.Getenv(model.GithubRepositoryEnvVar) == "" {
-		repo, err := model.GetRepositoryURL(cwd)
+		repo, err := modelUtils.GetRepositoryURL(cwd)
 		if err != nil {
 			oktetoLog.Infof("could not retrieve repo name: %s", err)
 		}
@@ -151,7 +151,7 @@ func (dc *DeployCommand) addEnvVars(cwd string) {
 			oktetoLog.Infof("could not retrieve sha: %s", err)
 		}
 		isClean := true
-		if !dc.isRemote {
+		if !dc.IsRemote {
 			isClean, err = repository.NewRepository(cwd).IsClean()
 			if err != nil {
 				oktetoLog.Infof("could not status: %s", err)
@@ -163,13 +163,13 @@ func (dc *DeployCommand) addEnvVars(cwd string) {
 		os.Setenv(constants.OktetoGitCommitEnvVar, sha)
 	}
 	if os.Getenv(model.OktetoRegistryURLEnvVar) == "" {
-		os.Setenv(model.OktetoRegistryURLEnvVar, okteto.Context().Registry)
+		os.Setenv(model.OktetoRegistryURLEnvVar, okteto.GetContext().Registry)
 	}
 	if os.Getenv(model.OktetoBuildkitHostURLEnvVar) == "" {
-		os.Setenv(model.OktetoBuildkitHostURLEnvVar, okteto.Context().Builder)
+		os.Setenv(model.OktetoBuildkitHostURLEnvVar, okteto.GetContext().Builder)
 	}
 	if os.Getenv(model.OktetoTokenEnvVar) == "" {
-		os.Setenv(model.OktetoTokenEnvVar, okteto.Context().Token)
+		os.Setenv(model.OktetoTokenEnvVar, okteto.GetContext().Token)
 	}
 	oktetoLog.AddMaskedWord(os.Getenv(model.OktetoTokenEnvVar))
 }

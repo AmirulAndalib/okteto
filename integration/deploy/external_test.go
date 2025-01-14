@@ -24,9 +24,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/okteto/okteto/cmd/deploy"
 	"github.com/okteto/okteto/integration"
 	"github.com/okteto/okteto/integration/commands"
+	"github.com/okteto/okteto/pkg/externalresource"
 	"github.com/okteto/okteto/pkg/k8s/kubeconfig"
 	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/stretchr/testify/require"
@@ -59,15 +59,16 @@ func Test_ExternalsFromOktetoManifestWithNotesContent(t *testing.T) {
 	require.NoError(t, createExternalNotes(dir))
 	require.NoError(t, createManifest(dir))
 
-	testNamespace := integration.GetTestNamespace("ExternalDeploy", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 
 	deployOptions := &commands.DeployOptions{
 		Workdir:    dir,
@@ -80,7 +81,7 @@ func Test_ExternalsFromOktetoManifestWithNotesContent(t *testing.T) {
 	_, cfg, err := okteto.NewK8sClientProvider().Provide(kubeconfig.Get([]string{filepath.Join(dir, ".kube", "config")}))
 	require.NoError(t, err)
 
-	externalControl := deploy.NewDeployExternalK8sControl(cfg)
+	externalControl := externalresource.NewExternalK8sControl(cfg)
 
 	externals, err := externalControl.List(ctx, namespaceOpts.Namespace, "")
 
@@ -115,6 +116,7 @@ func Test_ExternalsFromOktetoManifestWithNotesContent(t *testing.T) {
 		OktetoHome: dir,
 	}
 	require.NoError(t, commands.RunOktetoDestroy(oktetoPath, destroyOptions))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func createExternalNotes(dir string) error {

@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package okteto
 
 import (
@@ -51,9 +64,8 @@ func (rc *registryCache) Set(host, user, pass string) {
 
 type externalRegistryCredentialsReader struct {
 	getter   func(ctx context.Context, host string) (dockertypes.AuthConfig, error)
+	cache    *registryCache
 	isOkteto bool
-
-	cache *registryCache
 }
 
 func (r *externalRegistryCredentialsReader) read(ctx context.Context, registryOrImage string) (string, string, error) {
@@ -98,6 +110,27 @@ func (r *externalRegistryCredentialsReader) read(ctx context.Context, registryOr
 	return ac.Username, ac.Password, err
 }
 
+func GetExternalRegistryCredentialsWithContextStateless(ctx context.Context, registryOrImage string, isOkteto bool, c *Client) (string, string, error) {
+	r := &externalRegistryCredentialsReader{
+		isOkteto: isOkteto,
+		getter:   c.User().GetRegistryCredentials,
+		cache:    &globalRegistryCredentialsCache,
+	}
+	oktetoLog.Infof("Obtaining credentials for %q ...", registryOrImage)
+	return r.read(ctx, registryOrImage)
+}
+
+// GetExternalRegistryCredentialsStateless returns registry credentials for a registry
+// defined in okteto.
+// This function is mostly executed by internal libraries (registry, docker
+// credentials helpers, etc) and we need to respect this signature.
+// For this reason, context is managed internally by the function.
+func GetExternalRegistryCredentialsStateless(registryOrImage string, isOkteto bool, c *Client) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+	return GetExternalRegistryCredentialsWithContextStateless(ctx, registryOrImage, isOkteto, c)
+}
+
 func GetExternalRegistryCredentialsWithContext(ctx context.Context, registryOrImage string) (string, string, error) {
 	c, err := NewOktetoClient()
 	if err != nil {
@@ -114,7 +147,7 @@ func GetExternalRegistryCredentialsWithContext(ctx context.Context, registryOrIm
 }
 
 // GetExternalRegistryCredentials returns registry credentials for a registry
-// defined in okteto.
+// defined in okteto without rely on an okteto context global var.
 // This function is mostly executed by internal libraries (registry, docker
 // credentials helpers, etc) and we need to respect this signature.
 // For this reason, context is managed internally by the function.

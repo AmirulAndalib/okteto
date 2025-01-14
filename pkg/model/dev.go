@@ -16,7 +16,6 @@ package model
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,25 +24,24 @@ import (
 	"strings"
 	"time"
 
-	"github.com/a8m/envsubst"
 	"github.com/compose-spec/godotenv"
 	"github.com/google/uuid"
-	"github.com/okteto/okteto/pkg/cache"
+	"github.com/okteto/okteto/pkg/config"
 	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/env"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/filesystem"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model/forward"
-	yaml "gopkg.in/yaml.v2"
+	"github.com/spf13/afero"
+	"gopkg.in/yaml.v2"
 	apiv1 "k8s.io/api/core/v1"
-	resource "k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 )
 
 var (
-	// OktetoBinImageTag image tag with okteto internal binaries
-	OktetoBinImageTag = "okteto/bin:1.4.3"
-
 	errBadName = fmt.Errorf("Invalid name: must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character")
 
 	// ValidKubeNameRegex is the regex to validate a kubernetes resource name
@@ -52,54 +50,45 @@ var (
 
 // Dev represents a development container
 type Dev struct {
-	Name                 string             `json:"name,omitempty" yaml:"name,omitempty"`
-	Username             string             `json:"-" yaml:"-"`
-	RegistryURL          string             `json:"-" yaml:"-"`
-	Selector             Selector           `json:"selector,omitempty" yaml:"selector,omitempty"`
-	Annotations          Annotations        `json:"annotations,omitempty" yaml:"annotations,omitempty"`
-	Tolerations          []apiv1.Toleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty"`
-	Context              string             `json:"context,omitempty" yaml:"context,omitempty"`
-	Namespace            string             `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Container            string             `json:"container,omitempty" yaml:"container,omitempty"`
-	EmptyImage           bool               `json:"-" yaml:"-"`
-	Image                *BuildInfo         `json:"image,omitempty" yaml:"image,omitempty"`
-	Push                 *BuildInfo         `json:"-" yaml:"push,omitempty"`
-	ImagePullPolicy      apiv1.PullPolicy   `json:"imagePullPolicy,omitempty" yaml:"imagePullPolicy,omitempty"`
-	Secrets              []Secret           `json:"secrets,omitempty" yaml:"secrets,omitempty"`
-	Command              Command            `json:"command,omitempty" yaml:"command,omitempty"`
-	Args                 Command            `json:"args,omitempty" yaml:"args,omitempty"`
-	Probes               *Probes            `json:"probes,omitempty" yaml:"probes,omitempty"`
-	Lifecycle            *Lifecycle         `json:"lifecycle,omitempty" yaml:"lifecycle,omitempty"`
-	Workdir              string             `json:"workdir,omitempty" yaml:"workdir,omitempty"`
-	SecurityContext      *SecurityContext   `json:"securityContext,omitempty" yaml:"securityContext,omitempty"`
-	ServiceAccount       string             `json:"serviceAccount,omitempty" yaml:"serviceAccount,omitempty"`
-	RemotePort           int                `json:"remote,omitempty" yaml:"remote,omitempty"`
-	SSHServerPort        int                `json:"sshServerPort,omitempty" yaml:"sshServerPort,omitempty"`
-	ExternalVolumes      []ExternalVolume   `json:"externalVolumes,omitempty" yaml:"externalVolumes,omitempty"`
-	Sync                 Sync               `json:"sync,omitempty" yaml:"sync,omitempty"`
-	parentSyncFolder     string
-	Forward              []forward.Forward     `json:"forward,omitempty" yaml:"forward,omitempty"`
-	Reverse              []Reverse             `json:"reverse,omitempty" yaml:"reverse,omitempty"`
-	Interface            string                `json:"interface,omitempty" yaml:"interface,omitempty"`
 	Resources            ResourceRequirements  `json:"resources,omitempty" yaml:"resources,omitempty"`
-	Services             []*Dev                `json:"services,omitempty" yaml:"services,omitempty"`
+	Selector             Selector              `json:"selector,omitempty" yaml:"selector,omitempty"`
 	PersistentVolumeInfo *PersistentVolumeInfo `json:"persistentVolume,omitempty" yaml:"persistentVolume,omitempty"`
-	InitContainer        InitContainer         `json:"initContainer,omitempty" yaml:"initContainer,omitempty"`
-	InitFromImage        bool                  `json:"initFromImage,omitempty" yaml:"initFromImage,omitempty"`
-	Timeout              Timeout               `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	SecurityContext      *SecurityContext      `json:"securityContext,omitempty" yaml:"securityContext,omitempty"`
+	Probes               *Probes               `json:"probes,omitempty" yaml:"probes,omitempty"`
 	NodeSelector         map[string]string     `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
-	Affinity             *Affinity             `json:"affinity,omitempty" yaml:"affinity,omitempty"`
 	Metadata             *Metadata             `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	Autocreate           bool                  `json:"autocreate,omitempty" yaml:"autocreate,omitempty"`
-	EnvFiles             EnvFiles              `json:"envFiles,omitempty" yaml:"envFiles,omitempty"`
-	Environment          Environment           `json:"environment,omitempty" yaml:"environment,omitempty"`
-	Volumes              []Volume              `json:"volumes,omitempty" yaml:"volumes,omitempty"`
-	Mode                 string                `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Affinity             *Affinity             `json:"affinity,omitempty" yaml:"affinity,omitempty"`
+	Image                string                `json:"image,omitempty" yaml:"image,omitempty"`
+	Lifecycle            *Lifecycle            `json:"lifecycle,omitempty" yaml:"lifecycle,omitempty"`
+	Replicas             *int                  `json:"replicas,omitempty" yaml:"replicas,omitempty"`
+	InitContainer        InitContainer         `json:"initContainer,omitempty" yaml:"initContainer,omitempty"`
+	Workdir              string                `json:"workdir,omitempty" yaml:"workdir,omitempty"`
+	Name                 string                `json:"name,omitempty" yaml:"name,omitempty"`
+	Container            string                `json:"container,omitempty" yaml:"container,omitempty"`
+	ServiceAccount       string                `json:"serviceAccount,omitempty" yaml:"serviceAccount,omitempty"`
+	PriorityClassName    string                `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty"`
+	parentSyncFolder     string
+	Interface            string           `json:"interface,omitempty" yaml:"interface,omitempty"`
+	Mode                 string           `json:"mode,omitempty" yaml:"mode,omitempty"`
+	ImagePullPolicy      apiv1.PullPolicy `json:"imagePullPolicy,omitempty" yaml:"imagePullPolicy,omitempty"`
 
-	Replicas *int `json:"replicas,omitempty" yaml:"replicas,omitempty"`
-	// Deprecated fields
-	Healthchecks bool   `json:"healthchecks,omitempty" yaml:"healthchecks,omitempty"`
-	Labels       Labels `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Tolerations     []apiv1.Toleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty"`
+	Command         Command            `json:"command,omitempty" yaml:"command,omitempty"`
+	Forward         []forward.Forward  `json:"forward,omitempty" yaml:"forward,omitempty"`
+	Reverse         []Reverse          `json:"reverse,omitempty" yaml:"reverse,omitempty"`
+	ExternalVolumes []ExternalVolume   `json:"externalVolumes,omitempty" yaml:"externalVolumes,omitempty"`
+	Secrets         []Secret           `json:"secrets,omitempty" yaml:"secrets,omitempty"`
+	Volumes         []Volume           `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+	EnvFiles        env.Files          `json:"envFiles,omitempty" yaml:"envFiles,omitempty"`
+	Environment     env.Environment    `json:"environment,omitempty" yaml:"environment,omitempty"`
+	Services        []*Dev             `json:"services,omitempty" yaml:"services,omitempty"`
+	Args            Command            `json:"args,omitempty" yaml:"args,omitempty"`
+	Sync            Sync               `json:"sync,omitempty" yaml:"sync,omitempty"`
+	Timeout         Timeout            `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	RemotePort      int                `json:"remote,omitempty" yaml:"remote,omitempty"`
+	SSHServerPort   int                `json:"sshServerPort,omitempty" yaml:"sshServerPort,omitempty"`
+
+	Autocreate bool `json:"autocreate,omitempty" yaml:"autocreate,omitempty"`
 }
 
 type Affinity apiv1.Affinity
@@ -119,108 +108,6 @@ type Args struct {
 	Values []string
 }
 
-// BuildInfo represents the build info to generate an image
-type BuildInfo struct {
-	Name             string            `yaml:"name,omitempty"`
-	Context          string            `yaml:"context,omitempty"`
-	Dockerfile       string            `yaml:"dockerfile,omitempty"`
-	CacheFrom        cache.CacheFrom   `yaml:"cache_from,omitempty"`
-	Target           string            `yaml:"target,omitempty"`
-	Args             BuildArgs         `yaml:"args,omitempty"`
-	Image            string            `yaml:"image,omitempty"`
-	VolumesToInclude []StackVolume     `yaml:"-"`
-	ExportCache      cache.ExportCache `yaml:"export_cache,omitempty"`
-	DependsOn        BuildDependsOn    `yaml:"depends_on,omitempty"`
-	Secrets          BuildSecrets      `yaml:"secrets,omitempty"`
-}
-
-// BuildArg is an argument used on the build step.
-type BuildArg struct {
-	Name  string
-	Value string
-}
-
-func (v *BuildArg) String() string {
-	value, err := ExpandEnv(v.Value, true)
-	if err != nil {
-		return fmt.Sprintf("%s=%s", v.Name, v.Value)
-	}
-	return fmt.Sprintf("%s=%s", v.Name, value)
-}
-
-// BuildArgs is a list of arguments used on the build step.
-type BuildArgs []BuildArg
-
-// BuildDependsOn represents the images that needs to be built before
-type BuildDependsOn []string
-
-// BuildSecrets represents the secrets to be injected to the build of the image
-type BuildSecrets map[string]string
-
-// GetDockerfilePath returns the path to the Dockerfile
-func (b *BuildInfo) GetDockerfilePath() string {
-	if filepath.IsAbs(b.Dockerfile) {
-		return b.Dockerfile
-	}
-
-	joinPath := filepath.Join(b.Context, b.Dockerfile)
-	if !filesystem.FileExistsAndNotDir(joinPath) {
-		oktetoLog.Infof("Dockerfile '%s' is not in a relative path to context '%s'", b.Dockerfile, b.Context)
-		return b.Dockerfile
-	}
-
-	if joinPath != filepath.Clean(b.Dockerfile) && filesystem.FileExistsAndNotDir(b.Dockerfile) {
-		oktetoLog.Infof("Two Dockerfiles discovered in both the root and context path, defaulting to '%s/%s'", b.Context, b.Dockerfile)
-	}
-
-	return joinPath
-}
-
-// AddBuildArgs add a set of args to the build information
-func (b *BuildInfo) AddBuildArgs(previousImageArgs map[string]string) error {
-	if err := b.expandManifestBuildArgs(previousImageArgs); err != nil {
-		return err
-	}
-	return b.addExpandedPreviousImageArgs(previousImageArgs)
-}
-
-func (b *BuildInfo) expandManifestBuildArgs(previousImageArgs map[string]string) (err error) {
-	for idx, arg := range b.Args {
-		if val, ok := previousImageArgs[arg.Name]; ok {
-			oktetoLog.Infof("overriding '%s' with the content of previous build", arg.Name)
-			arg.Value = val
-		}
-		arg.Value, err = ExpandEnv(arg.Value, true)
-		if err != nil {
-			return err
-		}
-		b.Args[idx] = arg
-	}
-	return nil
-}
-
-func (b *BuildInfo) addExpandedPreviousImageArgs(previousImageArgs map[string]string) error {
-	alreadyAddedArg := map[string]bool{}
-	for _, arg := range b.Args {
-		alreadyAddedArg[arg.Name] = true
-	}
-	for k, v := range previousImageArgs {
-		if _, ok := alreadyAddedArg[k]; ok {
-			continue
-		}
-		expandedValue, err := ExpandEnv(v, true)
-		if err != nil {
-			return err
-		}
-		b.Args = append(b.Args, BuildArg{
-			Name:  k,
-			Value: expandedValue,
-		})
-		oktetoLog.Infof("Added '%s' to build args", k)
-	}
-	return nil
-}
-
 // Volume represents a volume in the development container
 type Volume struct {
 	LocalPath  string
@@ -229,18 +116,18 @@ type Volume struct {
 
 // Sync represents a sync info in the development container
 type Sync struct {
+	LocalPath      string       `json:"-" yaml:"-"`
+	RemotePath     string       `json:"-" yaml:"-"`
+	Folders        []SyncFolder `json:"folders,omitempty" yaml:"folders,omitempty"`
+	RescanInterval int          `json:"rescanInterval,omitempty" yaml:"rescanInterval,omitempty"`
 	Compression    bool         `json:"compression" yaml:"compression"`
 	Verbose        bool         `json:"verbose" yaml:"verbose"`
-	RescanInterval int          `json:"rescanInterval,omitempty" yaml:"rescanInterval,omitempty"`
-	Folders        []SyncFolder `json:"folders,omitempty" yaml:"folders,omitempty"`
-	LocalPath      string
-	RemotePath     string
 }
 
 // SyncFolder represents a sync folder in the development container
 type SyncFolder struct {
-	LocalPath  string
-	RemotePath string
+	LocalPath  string `json:"localPath,omitempty" yaml:"localPath,omitempty"`
+	RemotePath string `json:"remotePath,omitempty" yaml:"remotePath,omitempty"`
 }
 
 // ExternalVolume represents a external volume in the development container
@@ -252,15 +139,19 @@ type ExternalVolume struct {
 
 // PersistentVolumeInfo info about the persistent volume
 type PersistentVolumeInfo struct {
-	Enabled      bool   `json:"enabled,omitempty" yaml:"enabled"`
-	StorageClass string `json:"storageClass,omitempty" yaml:"storageClass,omitempty"`
-	Size         string `json:"size,omitempty" yaml:"size,omitempty"`
+	Annotations  Annotations                      `json:"annotations,omitempty" yaml:"annotations,omitempty"`
+	Labels       Labels                           `json:"labels,omitempty" yaml:"labels,omitempty"`
+	AccessMode   apiv1.PersistentVolumeAccessMode `json:"accessMode,omitempty" yaml:"accessMode,omitempty"`
+	Size         string                           `json:"size,omitempty" yaml:"size,omitempty"`
+	StorageClass string                           `json:"storageClass,omitempty" yaml:"storageClass,omitempty"`
+	VolumeMode   apiv1.PersistentVolumeMode       `json:"volumeMode,omitempty" yaml:"volumeMode,omitempty"`
+	Enabled      bool                             `json:"enabled,omitempty" yaml:"enabled"`
 }
 
 // InitContainer represents the initial container
 type InitContainer struct {
-	Image     string               `json:"image,omitempty" yaml:"image,omitempty"`
 	Resources ResourceRequirements `json:"resources,omitempty" yaml:"resources,omitempty"`
+	Image     string               `json:"image,omitempty" yaml:"image,omitempty"`
 }
 
 // Timeout represents the timeout for the command
@@ -293,16 +184,6 @@ type Capabilities struct {
 	Drop []apiv1.Capability `json:"drop,omitempty" yaml:"drop,omitempty"`
 }
 
-// EnvVar represents an environment value. When loaded, it will expand from the current env
-type EnvVar struct {
-	Name  string `json:"name,omitempty" yaml:"name,omitempty"`
-	Value string `json:"value,omitempty" yaml:"value,omitempty"`
-}
-
-func (v *EnvVar) String() string {
-	return fmt.Sprintf("%s=%s", v.Name, v.Value)
-}
-
 // Secret represents a development secret
 type Secret struct {
 	LocalPath  string
@@ -331,8 +212,14 @@ type Probes struct {
 
 // Lifecycle defines the lifecycle for containers
 type Lifecycle struct {
-	PostStart bool `json:"postStart,omitempty" yaml:"postStart,omitempty"`
-	PostStop  bool `json:"postStop,omitempty" yaml:"postStop,omitempty"`
+	PostStart *LifecycleHandler `json:"postStart,omitempty" yaml:"postStart,omitempty"`
+	PreStop   *LifecycleHandler `json:"preStop,omitempty" yaml:"preStop,omitempty"`
+}
+
+// LifecycleHandler defines a handler for lifecycle events
+type LifecycleHandler struct {
+	Command Command `json:"command,omitempty" yaml:"command,omitempty"`
+	Enabled bool    `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 }
 
 // ResourceList is a set of (resource name, quantity) pairs.
@@ -347,47 +234,9 @@ type Selector map[string]string
 // Annotations is a set of (key, value) pairs.
 type Annotations map[string]string
 
-// Environment is a list of environment variables (key, value pairs).
-type Environment []EnvVar
-
-// EnvFiles is a list of environment files
-type EnvFiles []string
-
-// Get returns a Dev object from a given file
-func Get(devPath string) (*Manifest, error) {
-	b, err := os.ReadFile(devPath)
-	if err != nil {
-		return nil, err
-	}
-
-	manifest, err := Read(b)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, dev := range manifest.Dev {
-		if err := dev.translateDeprecatedVolumeFields(); err != nil {
-			return nil, err
-		}
-
-		if err := dev.loadAbsPaths(devPath); err != nil {
-			return nil, err
-		}
-
-		if err := dev.expandEnvFiles(); err != nil {
-			return nil, err
-		}
-
-		dev.computeParentSyncFolder()
-	}
-
-	return manifest, nil
-}
 func NewDev() *Dev {
 	return &Dev{
-		Image:       &BuildInfo{},
-		Push:        &BuildInfo{},
-		Environment: make(Environment, 0),
+		Environment: make(env.Environment, 0),
 		Secrets:     make([]Secret, 0),
 		Forward:     make([]forward.Forward, 0),
 		Volumes:     make([]Volume, 0),
@@ -398,7 +247,7 @@ func NewDev() *Dev {
 		PersistentVolumeInfo: &PersistentVolumeInfo{Enabled: true},
 		Probes:               &Probes{},
 		Lifecycle:            &Lifecycle{},
-		InitContainer:        InitContainer{Image: OktetoBinImageTag},
+		InitContainer:        InitContainer{Image: config.NewImageConfig(oktetoLog.GetOutputWriter()).GetBinImage()},
 		Metadata: &Metadata{
 			Labels:      Labels{},
 			Annotations: Annotations{},
@@ -406,55 +255,53 @@ func NewDev() *Dev {
 	}
 }
 
-func (dev *Dev) loadAbsPaths(devPath string) error {
+// loadAbsPaths makes every path used in the dev struct an absolute paths
+func (dev *Dev) loadAbsPaths(devPath string, fs afero.Fs) error {
 	devDir, err := filepath.Abs(filepath.Dir(devPath))
 	if err != nil {
 		return err
 	}
 
-	if uri, err := url.ParseRequestURI(dev.Image.Context); err != nil || (uri != nil && (uri.Scheme == "" || uri.Host == "")) {
-		dev.Image.Context = loadAbsPath(devDir, dev.Image.Context)
-		dev.Image.Dockerfile = loadAbsPath(devDir, dev.Image.Dockerfile)
-	}
-	if uri, err := url.ParseRequestURI(dev.Push.Context); err != nil || (uri != nil && (uri.Scheme == "" || uri.Host == "")) {
-		dev.Push.Context = loadAbsPath(devDir, dev.Push.Context)
-		dev.Push.Dockerfile = loadAbsPath(devDir, dev.Push.Dockerfile)
-	}
-
-	dev.loadVolumeAbsPaths(devDir)
+	dev.loadVolumeAbsPaths(devDir, fs)
 	for _, s := range dev.Services {
-		s.loadVolumeAbsPaths(devDir)
+		s.loadVolumeAbsPaths(devDir, fs)
 	}
 	return nil
 }
 
-func (dev *Dev) loadVolumeAbsPaths(folder string) {
+func (dev *Dev) loadVolumeAbsPaths(folder string, fs afero.Fs) {
 	for i := range dev.Volumes {
 		if dev.Volumes[i].LocalPath == "" {
 			continue
 		}
-		dev.Volumes[i].LocalPath = loadAbsPath(folder, dev.Volumes[i].LocalPath)
+		dev.Volumes[i].LocalPath = loadAbsPath(folder, dev.Volumes[i].LocalPath, fs)
 	}
 	for i := range dev.Sync.Folders {
-		dev.Sync.Folders[i].LocalPath = loadAbsPath(folder, dev.Sync.Folders[i].LocalPath)
+		dev.Sync.Folders[i].LocalPath = loadAbsPath(folder, dev.Sync.Folders[i].LocalPath, fs)
 	}
 }
 
-func loadAbsPath(folder, path string) string {
+func loadAbsPath(folder, path string, fs afero.Fs) string {
 	if filepath.IsAbs(path) {
+		realpath, err := filesystem.Realpath(fs, path)
+		if err != nil {
+			oktetoLog.Infof("error getting real path of %s: %s", path, err.Error())
+			return path
+		}
+		return realpath
+	}
+
+	path = filepath.Join(folder, path)
+	realpath, err := filesystem.Realpath(fs, path)
+	if err != nil {
+		oktetoLog.Infof("error getting real path of %s: %s", path, err.Error())
 		return path
 	}
-	return filepath.Join(folder, path)
+	return realpath
 }
 
 func (dev *Dev) expandEnvVars() error {
 	if err := dev.loadName(); err != nil {
-		return err
-	}
-	if err := dev.loadNamespace(); err != nil {
-		return err
-	}
-	if err := dev.loadContext(); err != nil {
 		return err
 	}
 	if err := dev.loadSelector(); err != nil {
@@ -467,29 +314,7 @@ func (dev *Dev) expandEnvVars() error {
 func (dev *Dev) loadName() error {
 	var err error
 	if len(dev.Name) > 0 {
-		dev.Name, err = ExpandEnv(dev.Name, true)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (dev *Dev) loadNamespace() error {
-	var err error
-	if len(dev.Namespace) > 0 {
-		dev.Namespace, err = ExpandEnv(dev.Namespace, true)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (dev *Dev) loadContext() error {
-	var err error
-	if len(dev.Context) > 0 {
-		dev.Context, err = ExpandEnv(dev.Context, true)
+		dev.Name, err = env.ExpandEnv(dev.Name)
 		if err != nil {
 			return err
 		}
@@ -500,7 +325,7 @@ func (dev *Dev) loadContext() error {
 func (dev *Dev) loadSelector() error {
 	var err error
 	for i := range dev.Selector {
-		dev.Selector[i], err = ExpandEnv(dev.Selector[i], true)
+		dev.Selector[i], err = env.ExpandEnv(dev.Selector[i])
 		if err != nil {
 			return err
 		}
@@ -510,17 +335,11 @@ func (dev *Dev) loadSelector() error {
 
 func (dev *Dev) loadImage() error {
 	var err error
-	if dev.Image == nil {
-		dev.Image = &BuildInfo{}
-	}
-	if len(dev.Image.Name) > 0 {
-		dev.Image.Name, err = ExpandEnv(dev.Image.Name, false)
+	if dev.Image != "" {
+		dev.Image, err = env.ExpandEnvIfNotEmpty(dev.Image)
 		if err != nil {
 			return err
 		}
-	}
-	if dev.Image.Name == "" {
-		dev.EmptyImage = true
 	}
 	return nil
 }
@@ -538,14 +357,6 @@ func (dev *Dev) SetDefaults() error {
 			return dev.Forward[i].Less(&dev.Forward[j])
 		})
 	}
-	if dev.Image == nil {
-		dev.Image = &BuildInfo{}
-	}
-	dev.Image.setBuildDefaults()
-	if dev.Push == nil {
-		dev.Push = &BuildInfo{}
-	}
-	dev.Push.setBuildDefaults()
 
 	if err := dev.setTimeout(); err != nil {
 		return err
@@ -568,14 +379,9 @@ func (dev *Dev) SetDefaults() error {
 	}
 
 	if dev.InitContainer.Image == "" {
-		dev.InitContainer.Image = OktetoBinImageTag
+		dev.InitContainer.Image = config.NewImageConfig(oktetoLog.GetOutputWriter()).GetBinImage()
 	}
-	if dev.Healthchecks {
-		oktetoLog.Yellow("The use of 'healthchecks' field is deprecated and will be removed in a future version. Please use the field 'probes' instead.")
-		if dev.Probes == nil {
-			dev.Probes = &Probes{Liveness: true, Readiness: true, Startup: true}
-		}
-	}
+
 	if dev.Probes == nil {
 		dev.Probes = &Probes{}
 	}
@@ -594,7 +400,7 @@ func (dev *Dev) SetDefaults() error {
 	if os.Getenv(OktetoRescanIntervalEnvVar) != "" {
 		rescanInterval, err := strconv.Atoi(os.Getenv(OktetoRescanIntervalEnvVar))
 		if err != nil {
-			return fmt.Errorf("cannot parse 'OKTETO_RESCAN_INTERVAL' into an integer: %s", err.Error())
+			return fmt.Errorf("cannot parse 'OKTETO_RESCAN_INTERVAL' into an integer: %w", err)
 		}
 		dev.Sync.RescanInterval = rescanInterval
 	} else if dev.Sync.RescanInterval == 0 {
@@ -620,14 +426,6 @@ func (dev *Dev) SetDefaults() error {
 		if s.Selector == nil {
 			s.Selector = map[string]string{}
 		}
-		if s.Annotations == nil {
-			s.Annotations = Annotations{}
-		}
-		if s.Name != "" && len(s.Selector) > 0 {
-			return fmt.Errorf("'name' and 'selector' cannot be defined at the same time for service '%s'", s.Name)
-		}
-		s.Namespace = ""
-		s.Context = ""
 		s.setRunAsUserDefaults(dev)
 		s.Forward = make([]forward.Forward, 0)
 		s.Reverse = make([]Reverse, 0)
@@ -650,17 +448,6 @@ func (dev *Dev) SetDefaults() error {
 	return nil
 }
 
-func (b *BuildInfo) setBuildDefaults() {
-	if b.Context == "" {
-		b.Context = "."
-	}
-
-	if _, err := url.ParseRequestURI(b.Context); err != nil && b.Dockerfile == "" {
-		b.Dockerfile = "Dockerfile"
-	}
-
-}
-
 func (dev *Dev) setRunAsUserDefaults(main *Dev) {
 	if !main.PersistentVolumeEnabled() {
 		return
@@ -672,7 +459,7 @@ func (dev *Dev) setRunAsUserDefaults(main *Dev) {
 		dev.SecurityContext = &SecurityContext{}
 	}
 	if dev.SecurityContext.RunAsUser == nil {
-		dev.SecurityContext.RunAsUser = pointer.Int64Ptr(0)
+		dev.SecurityContext.RunAsUser = pointer.Int64(0)
 	}
 	if dev.SecurityContext.RunAsGroup == nil {
 		dev.SecurityContext.RunAsGroup = dev.SecurityContext.RunAsUser
@@ -699,9 +486,10 @@ func (dev *Dev) setTimeout() error {
 	return nil
 }
 
+// expandEnvFiles reads each env file and append all the variables to the environment
 func (dev *Dev) expandEnvFiles() error {
 	for _, envFile := range dev.EnvFiles {
-		filename, err := ExpandEnv(envFile, true)
+		filename, err := env.ExpandEnv(envFile)
 		if err != nil {
 			return err
 		}
@@ -718,7 +506,7 @@ func (dev *Dev) expandEnvFiles() error {
 
 		envMap, err := godotenv.ParseWithLookup(f, os.LookupEnv)
 		if err != nil {
-			return fmt.Errorf("error parsing env_file %s: %s", filename, err.Error())
+			return fmt.Errorf("error parsing env_file %s: %w", filename, err)
 		}
 
 		for _, e := range dev.Environment {
@@ -732,7 +520,7 @@ func (dev *Dev) expandEnvFiles() error {
 			if value != "" {
 				dev.Environment = append(
 					dev.Environment,
-					EnvVar{Name: name, Value: value},
+					env.Var{Name: name, Value: value},
 				)
 			}
 		}
@@ -745,10 +533,6 @@ func (dev *Dev) expandEnvFiles() error {
 func (dev *Dev) Validate() error {
 	if dev.Name == "" {
 		return fmt.Errorf("name cannot be empty")
-	}
-
-	if dev.Image == nil {
-		dev.Image = &BuildInfo{}
 	}
 
 	if dev.Replicas != nil {
@@ -809,6 +593,21 @@ func (dev *Dev) Validate() error {
 	return nil
 }
 
+// PreparePathsAndExpandEnvFiles calls other methods required to have the dev ready to use
+func (dev *Dev) PreparePathsAndExpandEnvFiles(manifestPath string, fs afero.Fs) error {
+	if err := dev.loadAbsPaths(manifestPath, fs); err != nil {
+		return err
+	}
+
+	if err := dev.expandEnvFiles(); err != nil {
+		return err
+	}
+
+	dev.computeParentSyncFolder()
+
+	return nil
+}
+
 func (dev *Dev) validateSync() error {
 	for _, folder := range dev.Sync.Folders {
 		validPath, err := os.Stat(folder.LocalPath)
@@ -852,8 +651,12 @@ func validatePullPolicy(pullPolicy apiv1.PullPolicy) error {
 func validateSecrets(secrets []Secret) error {
 	seen := map[string]bool{}
 	for _, s := range secrets {
+		if err := s.validate(); err != nil {
+			return err
+		}
+
 		if _, ok := seen[s.GetFileName()]; ok {
-			return fmt.Errorf("Secrets with the same basename '%s' are not supported", s.GetFileName())
+			return fmt.Errorf("secrets with the same basename '%s' are not supported", s.GetFileName())
 		}
 		seen[s.GetFileName()] = true
 	}
@@ -948,19 +751,8 @@ func (dev *Dev) Save(path string) error {
 	return nil
 }
 
-// SerializeBuildArgs returns build  args as a list of strings
-func SerializeBuildArgs(buildArgs BuildArgs) []string {
-	result := []string{}
-	for _, e := range buildArgs {
-		result = append(result, e.String())
-	}
-	// // stable serialization
-	sort.Strings(result)
-	return result
-}
-
 // SerializeEnvironmentVars returns environment variables as a list of strings
-func SerializeEnvironmentVars(envs Environment) []string {
+func SerializeEnvironmentVars(envs env.Environment) []string {
 	result := []string{}
 	for _, e := range envs {
 		result = append(result, e.String())
@@ -970,7 +762,7 @@ func SerializeEnvironmentVars(envs Environment) []string {
 	return result
 }
 
-// SetLastBuiltAnnotation sets the dev timestacmp
+// SetLastBuiltAnnotation sets the dev timestamp
 func (dev *Dev) SetLastBuiltAnnotation() {
 	if dev.Metadata.Annotations == nil {
 		dev.Metadata.Annotations = Annotations{}
@@ -996,33 +788,57 @@ func (dev *Dev) LabelsSelector() string {
 	return labels
 }
 
+// TranslatePodAffinity translates the affinity of pod to be all on the same node
+func TranslatePodAffinity(tr *TranslationRule, name string) {
+	if tr.Affinity == nil {
+		tr.Affinity = &apiv1.Affinity{}
+	}
+	if tr.Affinity.PodAffinity == nil {
+		tr.Affinity.PodAffinity = &apiv1.PodAffinity{}
+	}
+	if tr.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		tr.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = []apiv1.PodAffinityTerm{}
+	}
+	tr.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+		tr.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+		apiv1.PodAffinityTerm{
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					InteractiveDevLabel: name,
+				},
+			},
+			TopologyKey: "kubernetes.io/hostname",
+		},
+	)
+}
+
 // ToTranslationRule translates a dev struct into a translation rule
-func (dev *Dev) ToTranslationRule(main *Dev, reset bool) *TranslationRule {
+func (dev *Dev) ToTranslationRule(main *Dev, namespace, username string, reset bool) *TranslationRule {
 	rule := &TranslationRule{
-		Container:        dev.Container,
-		ImagePullPolicy:  dev.ImagePullPolicy,
-		Environment:      dev.Environment,
-		Secrets:          dev.Secrets,
-		WorkDir:          dev.Workdir,
-		PersistentVolume: main.PersistentVolumeEnabled(),
-		Volumes:          []VolumeMount{},
-		SecurityContext:  dev.SecurityContext,
-		ServiceAccount:   dev.ServiceAccount,
-		Resources:        dev.Resources,
-		Healthchecks:     dev.Healthchecks,
-		InitContainer:    dev.InitContainer,
-		Probes:           dev.Probes,
-		Lifecycle:        dev.Lifecycle,
-		NodeSelector:     dev.NodeSelector,
-		Affinity:         (*apiv1.Affinity)(dev.Affinity),
+		Container:         dev.Container,
+		ImagePullPolicy:   dev.ImagePullPolicy,
+		Environment:       dev.Environment,
+		Secrets:           dev.Secrets,
+		WorkDir:           dev.Workdir,
+		PersistentVolume:  main.PersistentVolumeEnabled(),
+		Volumes:           []VolumeMount{},
+		SecurityContext:   dev.SecurityContext,
+		ServiceAccount:    dev.ServiceAccount,
+		PriorityClassName: main.PriorityClassName,
+		Resources:         dev.Resources,
+		InitContainer:     dev.InitContainer,
+		Probes:            dev.Probes,
+		Lifecycle:         dev.Lifecycle,
+		NodeSelector:      dev.NodeSelector,
+		Affinity:          (*apiv1.Affinity)(dev.Affinity),
 	}
 
 	if dev.IsHybridModeEnabled() {
 		rule.WorkDir = "/okteto"
 	}
 
-	if !dev.EmptyImage {
-		rule.Image = dev.Image.Name
+	if dev.Image != "" {
+		rule.Image = dev.Image
 	}
 
 	if rule.Healthchecks {
@@ -1033,25 +849,26 @@ func (dev *Dev) ToTranslationRule(main *Dev, reset bool) *TranslationRule {
 		rule.Healthchecks = true
 	}
 	if main == dev {
-		rule.Marker = OktetoBinImageTag // for backward compatibility
+		rule.Marker = config.NewImageConfig(oktetoLog.GetOutputWriter()).GetBinImage() // for backward compatibility
 		rule.OktetoBinImageTag = dev.InitContainer.Image
 		rule.Environment = append(
 			rule.Environment,
-			EnvVar{
+			env.Var{
 				Name:  "OKTETO_NAMESPACE",
-				Value: dev.Namespace,
+				Value: namespace,
 			},
-			EnvVar{
+			env.Var{
 				Name:  "OKTETO_NAME",
 				Value: dev.Name,
 			},
 		)
-		if dev.Username != "" {
+
+		if username != "" {
 			rule.Environment = append(
 				rule.Environment,
-				EnvVar{
+				env.Var{
 					Name:  "OKTETO_USERNAME",
-					Value: dev.Username,
+					Value: username,
 				},
 			)
 		}
@@ -1061,7 +878,7 @@ func (dev *Dev) ToTranslationRule(main *Dev, reset bool) *TranslationRule {
 		if dev.SSHServerPort != oktetoDefaultSSHServerPort {
 			rule.Environment = append(
 				rule.Environment,
-				EnvVar{
+				env.Var{
 					Name:  oktetoSSHServerPortVariable,
 					Value: strconv.Itoa(dev.SSHServerPort),
 				},
@@ -1104,11 +921,17 @@ func (dev *Dev) ToTranslationRule(main *Dev, reset bool) *TranslationRule {
 			}
 			rule.Args = append(rule.Args, "-s", fmt.Sprintf("%s:%s", filename, s.RemotePath))
 		}
-	} else if len(dev.Args.Values) > 0 {
-		rule.Args = dev.Args.Values
-	} else if len(dev.Command.Values) > 0 {
-		rule.Command = dev.Command.Values
-		rule.Args = []string{}
+	} else {
+		if main.PersistentVolumeAccessMode() != apiv1.ReadWriteMany {
+			//force all pods to land in the same node
+			TranslatePodAffinity(rule, main.Name)
+		}
+		if len(dev.Args.Values) > 0 {
+			rule.Args = dev.Args.Values
+		} else if len(dev.Command.Values) > 0 {
+			rule.Command = dev.Command.Values
+			rule.Args = []string{}
+		}
 	}
 
 	if main.PersistentVolumeEnabled() {
@@ -1158,42 +981,35 @@ func enableHistoryVolume(rule *TranslationRule, main *Dev) {
 		})
 
 	rule.Environment = append(rule.Environment,
-		EnvVar{
+		env.Var{
 			Name:  "HISTSIZE",
 			Value: "10000000",
 		},
-		EnvVar{
+		env.Var{
 			Name:  "HISTFILESIZE",
 			Value: "10000000",
 		},
-		EnvVar{
+		env.Var{
 			Name:  "HISTCONTROL",
 			Value: "ignoreboth:erasedups",
 		},
-		EnvVar{
+		env.Var{
 			Name:  "HISTFILE",
 			Value: "/var/okteto/bashrc/.bash_history",
 		},
-		EnvVar{
+		env.Var{
 			Name:  "BASHOPTS",
 			Value: "histappend",
 		},
-		EnvVar{
+		env.Var{
 			Name:  "PROMPT_COMMAND",
-			Value: "history -a ; history -c ; history -r ; $PROMPT_COMMAND",
+			Value: "history -a ; history -c ; history -r",
 		})
 }
 
 func areProbesEnabled(probes *Probes) bool {
 	if probes != nil {
 		return probes.Liveness || probes.Readiness || probes.Startup
-	}
-	return false
-}
-
-func areAllProbesEnabled(probes *Probes) bool {
-	if probes != nil {
-		return probes.Liveness && probes.Readiness && probes.Startup
 	}
 	return false
 }
@@ -1228,21 +1044,9 @@ func (s *Secret) GetFileName() string {
 	return filepath.Base(s.RemotePath)
 }
 
-// ExpandEnv expands the environments supporting the notation "${var:-$DEFAULT}"
-func ExpandEnv(value string, expandIfEmpty bool) (string, error) {
-	result, err := envsubst.String(value)
-	if err != nil {
-		return "", fmt.Errorf("error expanding environment on '%s': %s", value, err.Error())
-	}
-	if result == "" && !expandIfEmpty {
-		return value, nil
-	}
-	return result, nil
-}
-
 // GetTimeout returns the timeout override
 func GetTimeout() (time.Duration, error) {
-	defaultTimeout := (60 * time.Second)
+	defaultTimeout := 60 * time.Second
 
 	t := os.Getenv(OktetoTimeoutEnvVar)
 	if t == "" {
@@ -1257,59 +1061,13 @@ func GetTimeout() (time.Duration, error) {
 	return parsed, nil
 }
 
-func (dev *Dev) translateDeprecatedMetadataFields() {
-	if len(dev.Labels) > 0 {
-		oktetoLog.Warning("The field 'labels' is deprecated and will be removed in a future version. Use the field 'selector' instead (https://okteto.com/docs/reference/manifest/#selector)")
-		for k, v := range dev.Labels {
-			dev.Selector[k] = v
-		}
-	}
-
-	if len(dev.Annotations) > 0 {
-		oktetoLog.Warning("The field 'annotations' is deprecated and will be removed in a future version. Use the field 'metadata.annotations' instead (https://okteto.com/docs/reference/manifest/#metadata)")
-		for k, v := range dev.Annotations {
-			dev.Metadata.Annotations[k] = v
-		}
-	}
-	for indx, s := range dev.Services {
-		if len(s.Labels) > 0 {
-			oktetoLog.Warning("The field '%s.labels' is deprecated and will be removed in a future version. Use the field 'selector' instead (https://okteto.com/docs/reference/manifest/#selector)", s.Name)
-			for k, v := range s.Labels {
-				dev.Services[indx].Selector[k] = v
-			}
-		}
-
-		if len(s.Annotations) > 0 {
-			oktetoLog.Warning("The field 'annotations' is deprecated and will be removed in a future version. Use the field '%s.metadata.annotations' instead (https://okteto.com/docs/reference/manifest/#metadata)", s.Name)
-			for k, v := range s.Annotations {
-				dev.Services[indx].Metadata.Annotations[k] = v
-			}
-		}
-	}
-}
-
 func (service *Dev) validateForExtraFields() error {
-	errorMessage := "%q is not supported in Services. Please visit https://www.okteto.com/docs/reference/manifest/#services-object-optional for documentation"
-	if service.Username != "" {
-		return fmt.Errorf(errorMessage, "username")
-	}
-	if service.RegistryURL != "" {
-		return fmt.Errorf(errorMessage, "registryURL")
-	}
+	errorMessage := "%q is not supported in Services. Please visit https://www.okteto.com/docs/reference/okteto-manifest/#services-object-optional for documentation"
 	if service.Autocreate {
 		return fmt.Errorf(errorMessage, "autocreate")
 	}
-	if service.Context != "" {
-		return fmt.Errorf(errorMessage, "context")
-	}
-	if service.Push != nil {
-		return fmt.Errorf(errorMessage, "push")
-	}
 	if service.Secrets != nil {
 		return fmt.Errorf(errorMessage, "secrets")
-	}
-	if service.Healthchecks {
-		return fmt.Errorf(errorMessage, "healthchecks")
 	}
 	if service.Probes != nil {
 		return fmt.Errorf(errorMessage, "probes")
@@ -1322,6 +1080,9 @@ func (service *Dev) validateForExtraFields() error {
 	}
 	if service.ServiceAccount != "" {
 		return fmt.Errorf(errorMessage, "serviceAccount")
+	}
+	if service.PriorityClassName != "" {
+		return fmt.Errorf(errorMessage, "priorityClassName")
 	}
 	if service.RemotePort != 0 {
 		return fmt.Errorf(errorMessage, "remote")
@@ -1353,9 +1114,6 @@ func (service *Dev) validateForExtraFields() error {
 	if service.InitContainer.Image != "" {
 		return fmt.Errorf(errorMessage, "initContainer")
 	}
-	if service.InitFromImage {
-		return fmt.Errorf(errorMessage, "initFromImage")
-	}
 	if service.Timeout != (Timeout{}) {
 		return fmt.Errorf(errorMessage, "timeout")
 	}
@@ -1365,43 +1123,6 @@ func (service *Dev) validateForExtraFields() error {
 // DevCloneName returns the name of the mirrored version of a given resource
 func DevCloneName(name string) string {
 	return fmt.Sprintf("%s-okteto", name)
-}
-
-// Copy clones the buildInfo without the pointers
-func (b *BuildInfo) Copy() *BuildInfo {
-	result := &BuildInfo{
-		Name:        b.Name,
-		Context:     b.Context,
-		Dockerfile:  b.Dockerfile,
-		Target:      b.Target,
-		Image:       b.Image,
-		ExportCache: b.ExportCache,
-	}
-
-	// copy to new pointers
-	cacheFrom := []string{}
-	cacheFrom = append(cacheFrom, b.CacheFrom...)
-	result.CacheFrom = cacheFrom
-
-	args := BuildArgs{}
-	args = append(args, b.Args...)
-	result.Args = args
-
-	secrets := BuildSecrets{}
-	for k, v := range b.Secrets {
-		secrets[k] = v
-	}
-	result.Secrets = secrets
-
-	volumesToMount := []StackVolume{}
-	volumesToMount = append(volumesToMount, b.VolumesToInclude...)
-	result.VolumesToInclude = volumesToMount
-
-	dependsOn := BuildDependsOn{}
-	dependsOn = append(dependsOn, b.DependsOn...)
-	result.DependsOn = dependsOn
-
-	return result
 }
 
 func (dev *Dev) IsInteractive() bool {

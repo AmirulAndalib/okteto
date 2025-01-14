@@ -15,141 +15,125 @@ package v2
 
 import (
 	"fmt"
-	"github.com/okteto/okteto/pkg/okteto"
+	"regexp"
+	"strings"
 
+	"github.com/okteto/okteto/pkg/build"
 	"github.com/okteto/okteto/pkg/constants"
 	"github.com/okteto/okteto/pkg/format"
 	"github.com/okteto/okteto/pkg/model"
+	"github.com/okteto/okteto/pkg/registry"
 )
 
+var extendedImageRegex = regexp.MustCompile(`^[a-zA-Z0-9-_.]+\/[a-zA-Z0-9-_.]+\/([a-zA-Z0-9-_.]+):[a-zA-Z0-9-_.]+$`)
+
 type imageTaggerInterface interface {
-	tag(manifestName, svcName string, b *model.BuildInfo) string
-	getPossibleHashImages(manifestName, svcToBuildName, sha string) []string
-	getPossibleTags(manifestName, svcToBuildName, sha string) []string
+	getServiceDevImageReference(manifestName, svcName string, b *build.Info) string
+	getImageReferencesForTag(manifestName, svcToBuildName, tag string) []string
+	getImageReferencesForDeploy(manifestName, svcToBuildName string) []string
+	getGlobalTagFromDevIfNeccesary(tags, namespace, registryURL, buildHash string, ic registry.ImageCtrl) string
 }
 
+type smartBuildController interface {
+	IsEnabled() bool
+}
+
+// imageTagger implements an imageTaggerInterface with no volume mounts
 type imageTagger struct {
-	cfg oktetoBuilderConfigInterface
+	cfg                  oktetoBuilderConfigInterface
+	smartBuildController smartBuildController
 }
 
-type imageWithVolumesTagger struct {
-	cfg oktetoBuilderConfigInterface
-}
-
-func getTargetRegistries() []string {
+func getTargetRegistries(isOkteto bool) []string {
 	registries := []string{}
 
-	if okteto.IsOkteto() {
+	if isOkteto {
 		registries = append(registries, constants.DevRegistry, constants.GlobalRegistry)
 	}
 
 	return registries
 }
 
-// newImageTagger returns a new image tagger
-func newImageTagger(cfg oktetoBuilderConfigInterface) imageTagger {
+// newImageTagger returns an instance of imageTagger with the given config
+func newImageTagger(cfg oktetoBuilderConfigInterface, sbc smartBuildController) imageTagger {
 	return imageTagger{
-		cfg: cfg,
+		cfg:                  cfg,
+		smartBuildController: sbc,
 	}
 }
 
-// tag returns the full image tag for the build
-func (i imageTagger) tag(manifestName, svcName string, b *model.BuildInfo) string {
-	targetRegistry := constants.DevRegistry
-	sha := ""
-	if i.cfg.HasGlobalAccess() && i.cfg.IsCleanProject() {
-		targetRegistry = constants.GlobalRegistry
-		sha = i.cfg.GetBuildHash(b)
+/*
+getServiceDevImageReference returns the image reference [name]:[tag] for the given service.
+
+When service image is set on manifest, this is the returned one.
+
+Inferred tag is constructed using the following:
+[name] is the combination of the targetRegistry, manifestName and serviceName
+[tag] it is the default okteto tag "okteto".
+*/
+func (it imageTagger) getServiceDevImageReference(manifestName, svcName string, b *build.Info) string {
+	// when b.Image is set or services does not have dockerfile then no infer reference and return what is set on the manifest
+	if b.Image != "" || !serviceHasDockerfile(b) {
+		return b.Image
 	}
+
+	// build the image reference based on context and buildInfo
+	targetRegistry := constants.DevRegistry
 	sanitizedName := format.ResourceK8sMetaString(manifestName)
-	if shouldBuildFromDockerfile(b) && b.Image == "" {
-		if sha != "" {
-			return getImageFromTmpl(targetRegistry, sanitizedName, svcName, sha)
+	return useReferenceTemplate(targetRegistry, sanitizedName, svcName, model.OktetoDefaultImageTag)
+}
+
+func (it imageTagger) getGlobalTagFromDevIfNeccesary(tags, namespace, registryURL, buildHash string, ic registry.ImageCtrl) string {
+	if !it.cfg.HasGlobalAccess() || !it.smartBuildController.IsEnabled() || buildHash == "" {
+		return ""
+	}
+	tagList := strings.Split(tags, ",")
+	globalWithHash := ""
+	for _, tag := range tagList {
+		expandedTag := ic.ExpandOktetoDevRegistry(tag)
+		matches := extendedImageRegex.FindStringSubmatch(expandedTag)
+		regexGroupFullNameRepo := 2
+		if len(matches) != regexGroupFullNameRepo {
+			continue
 		}
-		return getImageFromTmpl(targetRegistry, sanitizedName, svcName, model.OktetoDefaultImageTag)
+		name := matches[1]
+		if strings.HasPrefix(expandedTag, fmt.Sprintf("%s/%s/", registryURL, namespace)) {
+			if globalWithHash != "" {
+				globalWithHash += ","
+			}
+			newImage := fmt.Sprintf("%s/%s:%s", constants.GlobalRegistry, name, buildHash)
+			globalWithHash += ic.ExpandOktetoGlobalRegistry(newImage)
+		}
 	}
-	return b.Image
+	return globalWithHash
 }
 
-// getPossibleHashImages returns all the possible images that can be built from a commit hash
-func (i imageTagger) getPossibleHashImages(manifestName, svcToBuildName, sha string) []string {
-	if sha == "" {
+// getImageReferencesForTag returns all the possible images references that can be used for build with the given tag
+func (it imageTagger) getImageReferencesForTag(manifestName, svcToBuildName, tag string) []string {
+	if tag == "" {
 		return []string{}
 	}
 
 	// manifestName can be not sanitized when option name is used at deploy
 	sanitizedName := format.ResourceK8sMetaString(manifestName)
-	tagsToCheck := []string{}
-	for _, targetRegistry := range getTargetRegistries() {
-		tagsToCheck = append(tagsToCheck, getImageFromTmpl(targetRegistry, sanitizedName, svcToBuildName, sha))
+	referencesToCheck := []string{}
+
+	for _, targetRegistry := range getTargetRegistries(it.cfg.IsOkteto()) {
+		referencesToCheck = append(referencesToCheck, useReferenceTemplate(targetRegistry, sanitizedName, svcToBuildName, tag))
 	}
-	return tagsToCheck
+	return referencesToCheck
 }
 
-// getPossibleTags returns all the possible images that can be built (with and without hash)
-func (i imageTagger) getPossibleTags(manifestName, svcToBuildName, sha string) []string {
-	tags := i.getPossibleHashImages(manifestName, svcToBuildName, sha)
+// getImageReferencesForDeploy returns the list of images references for a service when deploying it. In case of deploy,
+// we only have to check if the image is present with the okteto tag. We don't check anything related to the hash
+func (imageTagger) getImageReferencesForDeploy(manifestName, svcToBuildName string) []string {
 	sanitizedName := format.ResourceK8sMetaString(manifestName)
-	for _, targetRegistry := range getTargetRegistries() {
-		tags = append(tags, getImageFromTmpl(targetRegistry, sanitizedName, svcToBuildName, model.OktetoDefaultImageTag))
-	}
-	return tags
+	imageReferences := []string{useReferenceTemplate(constants.DevRegistry, sanitizedName, svcToBuildName, model.OktetoDefaultImageTag)}
+
+	return imageReferences
 }
 
-// newImageWithVolumesTagger returns a new image tagger
-func newImageWithVolumesTagger(cfg oktetoBuilderConfigInterface) imageWithVolumesTagger {
-	return imageWithVolumesTagger{
-		cfg: cfg,
-	}
-}
-
-// tag returns the full image tag for the build
-func (i imageWithVolumesTagger) tag(manifestName, svcName string, b *model.BuildInfo) string {
-	targetRegistry := constants.DevRegistry
-	sha := ""
-	buildCopy := b.Copy()
-	buildCopy.Image = ""
-	if i.cfg.HasGlobalAccess() && i.cfg.IsCleanProject() {
-		targetRegistry = constants.GlobalRegistry
-		sha = i.cfg.GetBuildHash(buildCopy)
-	}
-	sanitizedName := format.ResourceK8sMetaString(manifestName)
-	if sha != "" {
-		return getImageFromTmplWithVolumesAndSHA(targetRegistry, sanitizedName, svcName, sha)
-	}
-	return getImageFromTmpl(targetRegistry, sanitizedName, svcName, model.OktetoImageTagWithVolumes)
-}
-
-// getPossibleHashImages returns all the possible images that can be built from a commit hash
-func (i imageWithVolumesTagger) getPossibleHashImages(manifestName, svcToBuildName, sha string) []string {
-	if sha == "" {
-		return []string{}
-	}
-	// manifestName can be not sanitized when option name is used at deploy
-	sanitizedName := format.ResourceK8sMetaString(manifestName)
-	tagsToCheck := []string{}
-	for _, targetRegistry := range getTargetRegistries() {
-		tagsToCheck = append(tagsToCheck, getImageFromTmplWithVolumesAndSHA(targetRegistry, sanitizedName, svcToBuildName, sha))
-	}
-	return tagsToCheck
-}
-
-// getPossibleTags returns all the possible images that can be built (with and without hash)
-func (i imageWithVolumesTagger) getPossibleTags(manifestName, svcToBuildName, sha string) []string {
-	tags := i.getPossibleHashImages(manifestName, svcToBuildName, sha)
-	sanitizedName := format.ResourceK8sMetaString(manifestName)
-	for _, targetRegistry := range getTargetRegistries() {
-		tags = append(tags, getImageFromTmpl(targetRegistry, sanitizedName, svcToBuildName, model.OktetoImageTagWithVolumes))
-	}
-	return tags
-}
-
-// getImageFromTmpl returns the image name from the template of image tag
-func getImageFromTmpl(targetRegistry, repoName, svcName, tag string) string {
+// useReferenceTemplate returns the image reference with the given parameters [name]:[tag]
+func useReferenceTemplate(targetRegistry, repoName, svcName, tag string) string {
 	return fmt.Sprintf("%s/%s-%s:%s", targetRegistry, repoName, svcName, tag)
-}
-
-// getImageFromTmpl returns the image name from the template of image sha
-func getImageFromTmplWithVolumesAndSHA(targetRegistry, repoName, svcName, sha string) string {
-	return fmt.Sprintf("%s/%s-%s:%s-%s", targetRegistry, repoName, svcName, model.OktetoImageTagWithVolumes, sha)
 }

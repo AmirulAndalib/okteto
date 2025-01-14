@@ -39,13 +39,13 @@ func Test_SleepNamespace(t *testing.T) {
 		},
 	}
 	var tests = []struct {
-		name string
+		err           error
+		fakeOkClient  *client.FakeOktetoClient
+		fakeK8sClient *fake.Clientset
+		name          string
 		// toSleepNs the namespace to sleep
 		toSleepNs                       string
 		initialNamespacesAtOktetoClient []types.Namespace
-		fakeOkClient                    *client.FakeOktetoClient
-		fakeK8sClient                   *fake.Clientset
-		err                             error
 	}{
 		{
 			name:                            "sleeps existing ns, the current one",
@@ -86,8 +86,8 @@ func Test_SleepNamespace(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// init ctx current store with initial values
-			okteto.CurrentStore = &okteto.OktetoContextStore{
-				Contexts: map[string]*okteto.OktetoContext{
+			okteto.CurrentStore = &okteto.ContextStore{
+				Contexts: map[string]*okteto.Context{
 					"test-context": {
 						Name:      "test-context",
 						Token:     "test-token",

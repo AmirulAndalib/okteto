@@ -15,14 +15,16 @@ package test
 
 import (
 	"context"
+	"strings"
 
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/types"
 )
 
 // FakeOktetoBuilder emulates an okteto image builder
 type FakeOktetoBuilder struct {
-	Err      []error
 	Registry fakeOktetoRegistryInterface
+	Err      []error
 }
 
 type fakeOktetoRegistryInterface interface {
@@ -37,8 +39,12 @@ func NewFakeOktetoBuilder(registry fakeOktetoRegistryInterface, errors ...error)
 	}
 }
 
+func (fb *FakeOktetoBuilder) GetBuilder() string {
+	return "test"
+}
+
 // Run simulates a build
-func (fb *FakeOktetoBuilder) Run(_ context.Context, opts *types.BuildOptions) error {
+func (fb *FakeOktetoBuilder) Run(_ context.Context, opts *types.BuildOptions, _ *io.Controller) error {
 	if fb.Err != nil {
 		err := fb.Err[0]
 		fb.Err = fb.Err[1:]
@@ -46,8 +52,12 @@ func (fb *FakeOktetoBuilder) Run(_ context.Context, opts *types.BuildOptions) er
 	}
 
 	if opts.Tag != "" {
-		if err := fb.Registry.AddImageByOpts(opts); err != nil {
-			return err
+		for _, img := range strings.Split(opts.Tag, ",") {
+			newOpts := *opts
+			newOpts.Tag = img
+			if err := fb.Registry.AddImageByOpts(&newOpts); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

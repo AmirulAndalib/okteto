@@ -48,8 +48,8 @@ func newPreviewClient(client graphqlClientInterface) *previewClient {
 type PreviewEnv struct {
 	ID       string `json:"id" yaml:"id"`
 	Job      string `json:"job" yaml:"job"`
-	Sleeping bool   `json:"sleeping" yaml:"sleeping"`
 	Scope    string `json:"scope" yaml:"scope"`
+	Sleeping bool   `json:"sleeping" yaml:"sleeping"`
 }
 
 type InputVariable struct {
@@ -134,15 +134,16 @@ type endpointURL struct {
 
 type deprecatedPreviewEnv struct {
 	Id       graphql.String
-	Sleeping graphql.Boolean
 	Scope    graphql.String
+	Sleeping graphql.Boolean
 }
 
 type previewEnv struct {
 	Id            graphql.String
-	Sleeping      graphql.Boolean
 	Scope         graphql.String
+	Branch        graphql.String
 	PreviewLabels []graphql.String
+	Sleeping      graphql.Boolean
 }
 
 type deployPreviewResponse struct {
@@ -152,6 +153,10 @@ type deployPreviewResponse struct {
 
 type previewIDStruct struct {
 	Id graphql.String
+}
+
+type getPreviewQuery struct {
+	Response previewIDStruct `graphql:"preview(id: $id)"`
 }
 
 // DeployPreview creates a preview environment
@@ -279,6 +284,7 @@ func (c *previewClient) List(ctx context.Context, labels []string) ([]types.Prev
 			Sleeping:      bool(previewEnv.Sleeping),
 			Scope:         string(previewEnv.Scope),
 			PreviewLabels: labels,
+			Branch:        string(previewEnv.Branch),
 		})
 	}
 
@@ -401,4 +407,21 @@ func (*previewClient) translateErr(err error, name string) error {
 			Hint: "Please log in with an administrator account or use a personal preview environment"}
 	}
 	return err
+}
+
+// Get gets the given preview environment, returns its ID if found
+func (c *previewClient) Get(ctx context.Context, previewName string) (*types.Preview, error) {
+	queryStruct := getPreviewQuery{}
+
+	variables := map[string]interface{}{
+		"id": graphql.String(previewName),
+	}
+	err := query(ctx, &queryStruct, variables, c.client)
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.Preview{
+		ID: string(queryStruct.Response.Id),
+	}, nil
 }

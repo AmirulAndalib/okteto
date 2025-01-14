@@ -97,15 +97,16 @@ func TestUpGlobalForwarding(t *testing.T) {
 	oktetoPath, err := integration.GetOktetoPath()
 	require.NoError(t, err)
 
-	testNamespace := integration.GetTestNamespace("TestGlobalFwd", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 
 	require.NoError(t, writeFile(filepath.Join(dir, "docker-compose.yml"), globalForwardCompose))
 	require.NoError(t, writeFile(filepath.Join(dir, "okteto.yml"), globalForwardManifest))
@@ -180,4 +181,5 @@ func TestUpGlobalForwarding(t *testing.T) {
 	require.Equal(t, integration.GetContentFromURL(svc1LocalEndpoint, 20*time.Second), "")
 	require.Equal(t, integration.GetContentFromURL(svc2LocalEndpoint, 5*time.Second), "")
 	require.Equal(t, integration.GetContentFromURL(svc3LocalEndpoint, 5*time.Second), "")
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }

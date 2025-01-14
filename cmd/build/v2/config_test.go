@@ -1,38 +1,61 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package v2
 
 import (
 	"testing"
 
-	"github.com/okteto/okteto/pkg/model"
+	"github.com/okteto/okteto/pkg/okteto"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type fakeConfigRegistry struct {
-	access bool
 	err    error
+	access bool
 }
 
 func (fcr fakeConfigRegistry) HasGlobalPushAccess() (bool, error) { return fcr.access, fcr.err }
 
 type fakeConfigRepo struct {
-	sha     string
-	isClean bool
 	err     error
+	sha     string
+	url     string
+	diff    string
+	isClean bool
 }
 
-func (fcr fakeConfigRepo) GetSHA() (string, error) { return fcr.sha, fcr.err }
-func (fcr fakeConfigRepo) IsClean() (bool, error)  { return fcr.isClean, fcr.err }
+func (fcr fakeConfigRepo) GetSHA() (string, error)                { return fcr.sha, fcr.err }
+func (fcr fakeConfigRepo) IsClean() (bool, error)                 { return fcr.isClean, fcr.err }
+func (fcr fakeConfigRepo) GetAnonymizedRepo() string              { return fcr.url }
+func (fcr fakeConfigRepo) GetLatestDirSHA(string) (string, error) { return fcr.sha, fcr.err }
+func (fcr fakeConfigRepo) GetDiffHash(string) (string, error)     { return fcr.diff, fcr.err }
 
-func TestGetConfig(t *testing.T) {
+type fakeLogger struct{}
+
+func (fl fakeLogger) Infof(format string, args ...interface{}) {}
+
+func TestGetConfigStateless(t *testing.T) {
 	type input struct {
 		reg  fakeConfigRegistry
 		repo fakeConfigRepo
 	}
 	tt := []struct {
+		expected oktetoBuilderConfig
 		name     string
 		input    input
-		expected oktetoBuilderConfig
 	}{
 		{
 			name: "global access clean commit",
@@ -53,8 +76,9 @@ func TestGetConfig(t *testing.T) {
 					isClean: true,
 					err:     nil,
 				},
-				fs:       afero.NewOsFs(),
-				isOkteto: true,
+				fs:                  afero.NewOsFs(),
+				isOkteto:            true,
+				isSmartBuildsEnable: true,
 			},
 		},
 		{
@@ -76,8 +100,9 @@ func TestGetConfig(t *testing.T) {
 					isClean: true,
 					err:     nil,
 				},
-				fs:       afero.NewOsFs(),
-				isOkteto: true,
+				fs:                  afero.NewOsFs(),
+				isOkteto:            true,
+				isSmartBuildsEnable: true,
 			},
 		},
 		{
@@ -99,8 +124,9 @@ func TestGetConfig(t *testing.T) {
 					isClean: true,
 					err:     nil,
 				},
-				fs:       afero.NewOsFs(),
-				isOkteto: true,
+				fs:                  afero.NewOsFs(),
+				isOkteto:            true,
+				isSmartBuildsEnable: true,
 			},
 		},
 		{
@@ -122,14 +148,170 @@ func TestGetConfig(t *testing.T) {
 					isClean: false,
 					err:     assert.AnError,
 				},
-				fs:       afero.NewOsFs(),
-				isOkteto: true,
+				fs:                  afero.NewOsFs(),
+				isOkteto:            true,
+				isSmartBuildsEnable: true,
 			},
 		},
 	}
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := getConfig(tc.input.reg, tc.input.repo)
+			cfg := getConfigStateless(tc.input.reg, tc.input.repo, fakeLogger{}, true)
+			assert.Equal(t, tc.expected, cfg)
+		})
+	}
+}
+
+func TestGetConfig(t *testing.T) {
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
+			"test": {
+				Namespace: "test",
+				IsOkteto:  true,
+			},
+		},
+		CurrentContext: "test",
+	}
+	type input struct {
+		reg  fakeConfigRegistry
+		repo fakeConfigRepo
+	}
+	tt := []struct {
+		expected oktetoBuilderConfig
+		name     string
+		input    input
+	}{
+		{
+			name: "global access clean commit",
+			input: input{
+				reg: fakeConfigRegistry{
+					access: true,
+					err:    nil,
+				},
+				repo: fakeConfigRepo{
+					isClean: true,
+					err:     nil,
+				},
+			},
+			expected: oktetoBuilderConfig{
+				hasGlobalAccess: true,
+				isCleanProject:  true,
+				repository: fakeConfigRepo{
+					isClean: true,
+					err:     nil,
+				},
+				fs:                  afero.NewOsFs(),
+				isOkteto:            true,
+				isSmartBuildsEnable: true,
+			},
+		},
+		{
+			name: "no global access clean commit",
+			input: input{
+				reg: fakeConfigRegistry{
+					access: false,
+					err:    nil,
+				},
+				repo: fakeConfigRepo{
+					isClean: true,
+					err:     nil,
+				},
+			},
+			expected: oktetoBuilderConfig{
+				hasGlobalAccess: false,
+				isCleanProject:  true,
+				repository: fakeConfigRepo{
+					isClean: true,
+					err:     nil,
+				},
+				fs:                  afero.NewOsFs(),
+				isOkteto:            true,
+				isSmartBuildsEnable: true,
+			},
+		},
+		{
+			name: "error on global access clean commit",
+			input: input{
+				reg: fakeConfigRegistry{
+					access: false,
+					err:    assert.AnError,
+				},
+				repo: fakeConfigRepo{
+					isClean: true,
+					err:     nil,
+				},
+			},
+			expected: oktetoBuilderConfig{
+				hasGlobalAccess: false,
+				isCleanProject:  true,
+				repository: fakeConfigRepo{
+					isClean: true,
+					err:     nil,
+				},
+				fs:                  afero.NewOsFs(),
+				isOkteto:            true,
+				isSmartBuildsEnable: true,
+			},
+		},
+		{
+			name: "error on clean commit and global access",
+			input: input{
+				reg: fakeConfigRegistry{
+					access: false,
+					err:    assert.AnError,
+				},
+				repo: fakeConfigRepo{
+					isClean: false,
+					err:     assert.AnError,
+				},
+			},
+			expected: oktetoBuilderConfig{
+				hasGlobalAccess: false,
+				isCleanProject:  false,
+				repository: fakeConfigRepo{
+					isClean: false,
+					err:     assert.AnError,
+				},
+				fs:                  afero.NewOsFs(),
+				isOkteto:            true,
+				isSmartBuildsEnable: true,
+			},
+		},
+	}
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := getConfig(tc.input.reg, tc.input.repo, fakeLogger{})
+			assert.Equal(t, tc.expected, cfg)
+		})
+	}
+}
+
+func TestGetIsSmartBuildEnabled(t *testing.T) {
+	tt := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{
+			name:     "enabled feature flag",
+			input:    "true",
+			expected: true,
+		},
+		{
+			name:     "disabled feature flag",
+			input:    "false",
+			expected: false,
+		},
+		{
+			name:     "wrong feature flag value default true",
+			input:    "falsess",
+			expected: true,
+		},
+	}
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(OktetoEnableSmartBuildEnvVar, tc.input)
+			cfg := getIsSmartBuildEnabled()
 			assert.Equal(t, tc.expected, cfg)
 		})
 	}
@@ -138,8 +320,8 @@ func TestGetConfig(t *testing.T) {
 func TestGetGitCommit(t *testing.T) {
 	tt := []struct {
 		name     string
-		input    fakeConfigRepo
 		expected string
+		input    fakeConfigRepo
 	}{
 		{
 			name: "valid commit",
@@ -170,173 +352,12 @@ func TestGetGitCommit(t *testing.T) {
 	}
 }
 
-func TestGetTextToHash(t *testing.T) {
-	fs := afero.NewMemMapFs()
-	err := afero.WriteFile(fs, "secret", []byte("bar"), 0600)
-	assert.NoError(t, err)
-	t.Setenv("BAR", "bar")
-	type input struct {
-		repo      fakeConfigRepo
-		buildInfo *model.BuildInfo
-	}
-	tt := []struct {
-		name     string
-		input    input
-		expected string
-	}{
-		{
-			name: "valid commit",
-			input: input{
-				repo: fakeConfigRepo{
-					sha:     "1234567890",
-					isClean: true,
-					err:     nil,
-				},
-				buildInfo: &model.BuildInfo{
-					Args: model.BuildArgs{
-						{
-							Name:  "foo",
-							Value: "bar",
-						},
-						{
-							Name:  "key",
-							Value: "value",
-						},
-					},
-					Target: "target",
-					Secrets: model.BuildSecrets{
-						"secret": "secret",
-					},
-					Context:    "context",
-					Dockerfile: "dockerfile",
-					Image:      "image",
-				},
-			},
-			expected: "commit:1234567890;target:target;build_args:foo=bar;key=value;secrets:secret=secret;context:context;dockerfile:dockerfile;image:image;",
-		},
-		{
-			name: "invalid commit",
-			input: input{
-				repo: fakeConfigRepo{
-					sha:     "",
-					isClean: true,
-					err:     assert.AnError,
-				},
-				buildInfo: &model.BuildInfo{
-					Args: model.BuildArgs{
-						{
-							Name:  "foo",
-							Value: "bar",
-						},
-						{
-							Name:  "key",
-							Value: "value",
-						},
-					},
-					Target: "target",
-					Secrets: model.BuildSecrets{
-						"secret": "secret",
-					},
-					Context:    "context",
-					Dockerfile: "dockerfile",
-					Image:      "image",
-				},
-			},
-			expected: "commit:;target:target;build_args:foo=bar;key=value;secrets:secret=secret;context:context;dockerfile:dockerfile;image:image;",
-		},
-		{
-			name: "invalid commit and no args",
-			input: input{
-				repo: fakeConfigRepo{
-					sha:     "",
-					isClean: true,
-					err:     assert.AnError,
-				},
-				buildInfo: &model.BuildInfo{
-					Args:   model.BuildArgs{},
-					Target: "target",
-					Secrets: model.BuildSecrets{
-						"secret": "secret",
-					},
-					Context:    "context",
-					Dockerfile: "dockerfile",
-					Image:      "image",
-				},
-			},
-			expected: "commit:;target:target;build_args:;secrets:secret=secret;context:context;dockerfile:dockerfile;image:image;",
-		},
-		{
-			name: "arg with expansion",
-			input: input{
-				repo: fakeConfigRepo{
-					sha:     "",
-					isClean: true,
-					err:     assert.AnError,
-				},
-				buildInfo: &model.BuildInfo{
-					Args: model.BuildArgs{
-						{
-							Name:  "foo",
-							Value: "$BAR",
-						},
-					},
-					Target: "target",
-					Secrets: model.BuildSecrets{
-						"secret": "secret",
-					},
-					Context:    "context",
-					Dockerfile: "dockerfile",
-					Image:      "image",
-				},
-			},
-			expected: "commit:;target:target;build_args:foo=bar;secrets:secret=secret;context:context;dockerfile:dockerfile;image:image;",
+func Test_GetAnonymizedRepo(t *testing.T) {
+	cfg := oktetoBuilderConfig{
+		repository: fakeConfigRepo{
+			url: "repository url",
 		},
 	}
-	for _, tc := range tt {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := oktetoBuilderConfig{
-				repository: tc.input.repo,
-				fs:         fs,
-			}
-			assert.Equal(t, tc.expected, cfg.getTextToHash(tc.input.buildInfo, tc.input.repo.sha))
-		})
-	}
-}
 
-func TestGetBuildHash(t *testing.T) {
-	tt := []struct {
-		name        string
-		input       fakeConfigRepo
-		expectedLen int
-	}{
-		{
-			name: "valid commit",
-			input: fakeConfigRepo{
-				sha:     "1234567890",
-				isClean: true,
-				err:     nil,
-			},
-			expectedLen: 64,
-		},
-		{
-			name: "invalid commit",
-			input: fakeConfigRepo{
-				sha:     "",
-				isClean: true,
-				err:     assert.AnError,
-			},
-			expectedLen: 0,
-		},
-	}
-	for _, tc := range tt {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := oktetoBuilderConfig{
-				repository: tc.input,
-				fs:         afero.Afero{},
-			}
-			firstExecution := cfg.GetBuildHash(&model.BuildInfo{})
-			assert.Len(t, firstExecution, tc.expectedLen)
-			assert.Equal(t, firstExecution, cfg.GetBuildHash(&model.BuildInfo{}))
-		})
-	}
+	require.Equal(t, "repository url", cfg.GetAnonymizedRepo())
 }

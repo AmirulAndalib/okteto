@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package preview
 
 import (
@@ -5,26 +18,27 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/okteto/okteto/pkg/okteto"
+	"github.com/okteto/okteto/pkg/validator"
 	"github.com/stretchr/testify/assert"
 )
 
 func Test_optionsSetup(t *testing.T) {
 	ctxUsername := "username"
-	okteto.CurrentStore = &okteto.OktetoContextStore{
+	okteto.CurrentStore = &okteto.ContextStore{
 		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
+		Contexts: map[string]*okteto.Context{
 			"test": {
 				Username: ctxUsername,
 			},
 		},
 	}
 	tests := []struct {
-		name            string
 		expectError     error
 		opts            *DeployOptions
-		args            []string
 		expectedOptions *DeployOptions
+		name            string
 		expectedFile    string
+		args            []string
 	}{
 		{
 			name: "success-empty-args",
@@ -42,27 +56,6 @@ func Test_optionsSetup(t *testing.T) {
 				repository: "test-repository",
 				branch:     "test-branch",
 			},
-		},
-		{
-			name: "success-filename",
-			opts: &DeployOptions{
-				scope:              "personal",
-				repository:         "test-repository",
-				branch:             "test-branch",
-				deprecatedFilename: "filename-old",
-			},
-			expectedFile: "filename-old",
-		},
-		{
-			name: "success-filename-file",
-			opts: &DeployOptions{
-				scope:              "personal",
-				repository:         "test-repository",
-				branch:             "test-branch",
-				deprecatedFilename: "filename-old",
-				file:               "file",
-			},
-			expectedFile: "file",
 		},
 		{
 			name: "get-repository-err",
@@ -89,6 +82,13 @@ func Test_optionsSetup(t *testing.T) {
 			},
 			expectError: ErrNotValidPreviewScope,
 		},
+		{
+			name: "invalid-variable-name",
+			opts: &DeployOptions{
+				variables: []string{"OKTETO_CONTEXT=value"},
+			},
+			expectError: validator.ErrReservedVariableName,
+		},
 	}
 
 	for _, tt := range tests {
@@ -101,4 +101,22 @@ func Test_optionsSetup(t *testing.T) {
 		})
 	}
 
+}
+
+func Test_getPreviewURL(t *testing.T) {
+	ctxName := "https://my.okteto.instance"
+	okteto.CurrentStore = &okteto.ContextStore{
+		CurrentContext: "test",
+		Contexts: map[string]*okteto.Context{
+			"test": {
+				Name: ctxName,
+			},
+		},
+	}
+
+	t.Run("full-previews-url", func(t *testing.T) {
+		expected := "https://my.okteto.instance/previews/foo-bar"
+		actual := getPreviewURL("foo-bar")
+		assert.Equal(t, expected, actual)
+	})
 }

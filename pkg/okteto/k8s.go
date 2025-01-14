@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package okteto
 
 import (
@@ -9,6 +22,7 @@ import (
 
 	"github.com/okteto/okteto/pkg/k8s/ingresses"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
+	ioCtrl "github.com/okteto/okteto/pkg/log/io"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -34,21 +48,34 @@ type K8sClientProvider interface {
 	Provide(clientApiConfig *clientcmdapi.Config) (kubernetes.Interface, *rest.Config, error)
 }
 
+type K8sClientProviderWithLogger interface {
+	ProvideWithLogger(clientApiConfig *clientcmdapi.Config, k8sLogger *ioCtrl.K8sLogger) (kubernetes.Interface, *rest.Config, error)
+}
+
 // tokenRotationTransport updates the token of the config when the token is outdated
 type tokenRotationTransport struct {
-	rt http.RoundTripper
+	rt        http.RoundTripper
+	k8sLogger *ioCtrl.K8sLogger
 }
 
 // newTokenRotationTransport implements the RoundTripper interface
-func newTokenRotationTransport(rt http.RoundTripper) *tokenRotationTransport {
+func newTokenRotationTransport(rt http.RoundTripper, k8sLogger *ioCtrl.K8sLogger) *tokenRotationTransport {
 	return &tokenRotationTransport{
-		rt: rt,
+		rt:        rt,
+		k8sLogger: k8sLogger,
 	}
 }
 
 // RoundTrip to wrap http 401 status code in response
 func (t *tokenRotationTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.rt.RoundTrip(req)
+	if t.k8sLogger != nil && t.k8sLogger.IsEnabled() {
+		var statusCode int
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		t.k8sLogger.Log(statusCode, req.Method, req.URL.String())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -58,14 +85,28 @@ func (t *tokenRotationTransport) RoundTrip(req *http.Request) (*http.Response, e
 	return resp, err
 }
 
-type K8sClient struct{}
+type K8sClient struct {
+	oktetoK8sLogger *ioCtrl.K8sLogger
+}
 
+// NewK8sClientProvider returns new K8sClient
 func NewK8sClientProvider() *K8sClient {
 	return &K8sClient{}
 }
 
-func (*K8sClient) Provide(clientApiConfig *clientcmdapi.Config) (kubernetes.Interface, *rest.Config, error) {
-	return getK8sClientWithApiConfig(clientApiConfig)
+// NewK8sClientProviderWithLogger returns new K8sClient that logs all requests to k8s
+func NewK8sClientProviderWithLogger(oktetoK8sLogger *ioCtrl.K8sLogger) *K8sClient {
+	return &K8sClient{
+		oktetoK8sLogger: oktetoK8sLogger,
+	}
+}
+
+func (k *K8sClient) Provide(clientApiConfig *clientcmdapi.Config) (kubernetes.Interface, *rest.Config, error) {
+	return getK8sClientWithApiConfig(clientApiConfig, k.oktetoK8sLogger)
+}
+
+func (*K8sClient) ProvideWithLogger(clientApiConfig *clientcmdapi.Config, k8sLogger *ioCtrl.K8sLogger) (kubernetes.Interface, *rest.Config, error) {
+	return getK8sClientWithApiConfig(clientApiConfig, k8sLogger)
 }
 
 func (*K8sClient) GetIngressClient() (*ingresses.Client, error) {
@@ -101,7 +142,7 @@ func GetKubernetesTimeout() time.Duration {
 	return timeout
 }
 
-func getK8sClientWithApiConfig(clientApiConfig *clientcmdapi.Config) (*kubernetes.Clientset, *rest.Config, error) {
+func getK8sClientWithApiConfig(clientApiConfig *clientcmdapi.Config, k8sLogger *ioCtrl.K8sLogger) (*kubernetes.Clientset, *rest.Config, error) {
 	clientConfig := clientcmd.NewDefaultClientConfig(*clientApiConfig, nil)
 	config, err := clientConfig.ClientConfig()
 	if err != nil {
@@ -114,7 +155,7 @@ func getK8sClientWithApiConfig(clientApiConfig *clientcmdapi.Config) (*kubernete
 	var client *kubernetes.Clientset
 
 	config.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
-		return newTokenRotationTransport(rt)
+		return newTokenRotationTransport(rt, k8sLogger)
 	}
 
 	client, err = kubernetes.NewForConfig(config)

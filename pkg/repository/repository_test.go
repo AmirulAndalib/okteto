@@ -18,7 +18,9 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/okteto/okteto/pkg/constants"
 	"github.com/stretchr/testify/assert"
 )
@@ -39,39 +41,65 @@ func (frg *fakeRepositoryGetter) get(_ string) (gitRepositoryInterface, error) {
 }
 
 type fakeRepository struct {
-	worktree *fakeWorktree
-	head     *plumbing.Reference
-	err      error
+	err          error
+	worktree     *fakeWorktree
+	head         *plumbing.Reference
+	commit       string
+	diff         string
+	failInCommit bool
 }
 
 func (fr fakeRepository) Worktree() (gitWorktreeInterface, error) {
 	return fr.worktree, fr.err
 }
-
 func (fr fakeRepository) Head() (*plumbing.Reference, error) {
+	if fr.failInCommit {
+		return fr.head, nil
+	}
 	return fr.head, fr.err
 }
 
+func (fr fakeRepository) GetLatestSHA(context.Context, string, LocalGitInterface) (string, error) {
+	return fr.commit, fr.err
+}
+
+func (fr fakeRepository) Log(logOpts *git.LogOptions) (object.CommitIter, error) {
+	return nil, nil
+}
+
+func (fr fakeRepository) GetDiff(ctx context.Context, dirpath string, localGit LocalGitInterface) (string, error) {
+	return fr.diff, fr.err
+}
+
+func (fr fakeRepository) calculateUntrackedFiles(ctx context.Context, contextDir string) ([]string, error) {
+	return []string{}, fr.err
+}
+
 type fakeWorktree struct {
-	status oktetoGitStatus
-	root   string
-	err    error
+	err            error
+	status         oktetoGitStatus
+	root           string
+	untrackedFiles []string
 }
 
 func (fw fakeWorktree) GetRoot() string {
 	return fw.root
 }
 
-func (fw fakeWorktree) Status(context.Context, LocalGitInterface) (oktetoGitStatus, error) {
+func (fw fakeWorktree) Status(context.Context, string, LocalGitInterface) (oktetoGitStatus, error) {
 	return fw.status, fw.err
+}
+
+func (fw fakeWorktree) ListUntrackedFiles(context.Context, string, LocalGitInterface) ([]string, error) {
+	return fw.untrackedFiles, fw.err
 }
 
 func TestNewRepo(t *testing.T) {
 	tt := []struct {
+		expectedControl repositoryInterface
 		name            string
 		GitCommit       string
 		remoteDeploy    string
-		expectedControl repositoryInterface
 	}{
 		{
 			name:      "GitCommit is empty",
@@ -87,19 +115,11 @@ func TestNewRepo(t *testing.T) {
 				repoGetter: gitRepositoryGetter{},
 			},
 		},
-		{
-			name:         "GitCommit is not empty in remote deploy",
-			GitCommit:    "1234567890",
-			remoteDeploy: "true",
-			expectedControl: oktetoRemoteRepoController{
-				gitCommit: "1234567890",
-			},
-		},
 	}
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(constants.OktetoGitCommitEnvVar, tc.GitCommit)
-			t.Setenv(constants.OktetoDeployRemote, string(tc.remoteDeploy))
+			t.Setenv(constants.OktetoDeployRemote, tc.remoteDeploy)
 			r := NewRepository("https://my-repo/okteto/okteto")
 			assert.Equal(t, "/okteto/okteto", r.url.Path)
 			assert.IsType(t, tc.expectedControl, r.control)
@@ -234,7 +254,7 @@ func Test_GetAnonymizedRepo(t *testing.T) {
 						User:   url.User("git"),
 					},
 				}},
-			expected: "ssh://github.com/okteto/okteto.git",
+			expected: "https://github.com/okteto/okteto",
 		},
 		{
 			name: "https repo with credentials",
@@ -259,70 +279,65 @@ func Test_GetAnonymizedRepo(t *testing.T) {
 	}
 }
 
-func Test_getURLFromPath(t *testing.T) {
+func TestRepositoryURL_String(t *testing.T) {
 	tests := []struct {
 		name     string
-		path     string
-		expected repositoryURL
+		url      repositoryURL
+		expected string
 	}{
 		{
-			name: "https repo without credentials",
-			path: "https://github.com/okteto/okteto",
-			expected: repositoryURL{
-				url.URL{
-					Scheme: "https",
-					Host:   "github.com",
-					Path:   "/okteto/okteto",
+			name: "http scheme",
+			url: repositoryURL{
+				URL: url.URL{
+					Scheme: "http",
+					Host:   "okteto.com",
+					Path:   "docs",
+					User:   url.UserPassword("test", "password"),
 				},
 			},
+			expected: "https://okteto.com/docs",
 		},
 		{
-			name: "ssh repo",
-			path: "git@github.com:okteto/okteto.git",
-			expected: repositoryURL{
-				url.URL{
+			name: "https scheme",
+			url: repositoryURL{
+				URL: url.URL{
+					Scheme: "https",
+					Host:   "okteto.com",
+					Path:   "docs",
+					User:   url.UserPassword("test", "password"),
+				},
+			},
+			expected: "https://okteto.com/docs",
+		},
+		{
+			name: "ssh scheme",
+			url: repositoryURL{
+				URL: url.URL{
 					Scheme: "ssh",
-					Host:   "github.com",
-					Path:   "okteto/okteto.git",
-					User:   url.User("git"),
+					Host:   "okteto.com",
+					Path:   "docs",
+					User:   url.UserPassword("test", "password"),
 				},
 			},
+			expected: "https://okteto.com/docs",
 		},
 		{
-			name: "https repo with credentials",
-			path: "https://git:PASSWORD@github.com/okteto/okteto",
-			expected: repositoryURL{
-				url.URL{
-					Scheme: "https",
-					Host:   "github.com",
-					Path:   "/okteto/okteto",
-					User:   url.UserPassword("git", "PASSWORD"),
+			name: "git scheme",
+			url: repositoryURL{
+				URL: url.URL{
+					Scheme: "ssh",
+					Host:   "okteto.com",
+					Path:   "okteto/okteto.git",
 				},
 			},
+			expected: "https://okteto.com/okteto/okteto",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := getURLFromPath(tt.path)
+			got := tt.url.String()
 			assert.Equal(t, tt.expected, got)
 		})
 	}
-}
-
-func Test_String(t *testing.T) {
-	r := &repositoryURL{
-		url.URL{
-			Scheme: "http",
-			Host:   "okteto.com",
-			Path:   "docs",
-			User:   url.UserPassword("test", "password"),
-		},
-	}
-
-	expected := "http://okteto.com/docs"
-	got := r.String()
-
-	assert.Equal(t, expected, got)
-	assert.NotNil(t, r.URL.User)
 }

@@ -26,170 +26,11 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func Test_LoadManifestOrDefault(t *testing.T) {
-	var tests = []struct {
-		name       string
-		deployment string
-		expectErr  bool
-		dev        *model.Dev
-	}{
-		{
-			name:       "default",
-			deployment: "default-deployment",
-			expectErr:  false,
-		},
-		{
-			name:       "default-no-name",
-			deployment: "",
-			expectErr:  true,
-		},
-		{
-			name:       "load-dev",
-			deployment: "test-deployment",
-			expectErr:  false,
-			dev: &model.Dev{
-				Name: "loaded",
-				Image: &model.BuildInfo{
-					Name: "okteto/test:1.0",
-				},
-				Sync: model.Sync{
-					Folders: []model.SyncFolder{
-						{
-							LocalPath:  ".",
-							RemotePath: "/path",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		CurrentContext: "test",
-		Contexts: map[string]*okteto.OktetoContext{
-			"test": {
-				Name:      "test",
-				Namespace: "namespace",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			def, err := DeprecatedLoadManifestOrDefault("/tmp/a-path", tt.deployment)
-			if tt.expectErr {
-				if err == nil {
-					t.Fatal("expected error when loading")
-				}
-
-				if !oktetoErrors.IsNotExist(err) {
-					t.Fatalf("expected not found got: %s", err)
-				}
-
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %s", err)
-			}
-
-			if def.Dev[tt.deployment].Name != tt.deployment {
-				t.Errorf("expected default name, got %s", tt.deployment)
-			}
-
-			if tt.dev == nil {
-				return
-			}
-
-			f, err := os.CreateTemp("", "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			f.Close()
-			defer os.Remove(f.Name())
-
-			if err := tt.dev.Save(f.Name()); err != nil {
-				t.Fatal(err)
-			}
-
-			loaded, err := DeprecatedLoadManifestOrDefault(f.Name(), "foo")
-			if err != nil {
-				t.Fatalf("unexpected error when loading existing manifest: %s", err.Error())
-			}
-
-			if tt.dev.Image.Name != loaded.Dev["loaded"].Image.Name {
-				t.Fatalf("expected %s got %s", tt.dev.Image.Name, loaded.Dev["foo"].Image.Name)
-			}
-
-			if tt.dev.Name != loaded.Dev["loaded"].Name {
-				t.Fatalf("expected %s got %s", tt.dev.Name, loaded.Dev["foo"].Name)
-			}
-
-		})
-	}
-	name := "demo-deployment"
-	def, err := DeprecatedLoadManifestOrDefault("/tmp/bad-path", name)
-	if err != nil {
-		t.Fatal("default dev was not returned")
-	}
-
-	if def.Dev[name].Name != name {
-		t.Errorf("expected %s, got %s", name, def.Dev[name].Name)
-	}
-
-	_, err = DeprecatedLoadManifestOrDefault("/tmp/bad-path", "")
-	if err == nil {
-		t.Error("expected error with empty deployment name")
-	}
-}
-
-func Test_ParseURL(t *testing.T) {
-	tests := []struct {
-		name    string
-		u       string
-		want    string
-		wantErr bool
-	}{
-		{
-			name: "full",
-			u:    "https://okteto.cloud.okteto.net",
-			want: "https://okteto.cloud.okteto.net",
-		},
-		{
-			name: "no-protocol",
-			u:    "okteto.cloud.okteto.net",
-			want: "https://okteto.cloud.okteto.net",
-		},
-		{
-			name: "trim-slash",
-			u:    "https://okteto.cloud.okteto.net/",
-			want: "https://okteto.cloud.okteto.net",
-		},
-		{
-			name: "ip",
-			u:    "https://192.168.0.1",
-			want: "https://192.168.0.1",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseURL(tt.u)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("parseURL() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("parseURL() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func Test_CheckIfDirectory(t *testing.T) {
 	tests := []struct {
+		want error
 		name string
 		path string
-		want error
 	}{
 		{
 			name: "directory",
@@ -223,52 +64,23 @@ func Test_CheckIfDirectory(t *testing.T) {
 	}
 }
 
-func Test_CheckIfRegularFile(t *testing.T) {
-	tests := []struct {
-		name string
-		path string
-		want error
-	}{
-		{
-			name: "file",
-			path: "dev.go",
-			want: nil,
-		},
-		{
-			name: "directory",
-			path: ".",
-			want: fmt.Errorf("'.' is not a regular file"),
-		},
-		{
-			name: "file",
-			path: "no.go",
-			want: fmt.Errorf("'no.go' does not exist"),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := CheckIfRegularFile(tt.path)
-			if got == nil && tt.want == nil {
-				return
-			}
-			if got == nil || tt.want == nil {
-				t.Errorf("CheckIfRegularFile(%s) = %s, want %s", tt.path, got, tt.want)
-			}
-			if got.Error() != tt.want.Error() {
-				t.Errorf("CheckIfRegularFile(%s) = %s, want %s", tt.path, got, tt.want)
-			}
-		})
-	}
-}
-
 func Test_GetDevFromManifest(t *testing.T) {
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
+			"example": {
+				Namespace: "unit-test",
+			},
+		},
+		CurrentContext: "example",
+	}
+
 	wrongDevName := "not-test"
 	tests := []struct {
-		name     string
-		manifest *model.Manifest
-		devName  string
-		dev      *model.Dev
 		err      error
+		manifest *model.Manifest
+		dev      *model.Dev
+		name     string
+		devName  string
 	}{
 		{
 			name:     "manifest has no dev section",
@@ -342,14 +154,16 @@ func Test_GetDevFromManifest(t *testing.T) {
 			assert.Equal(t, tt.dev, dev)
 			if tt.err != nil {
 				assert.Equal(t, tt.err.Error(), err.Error())
+			} else {
+				assert.NoError(t, err)
 			}
 		})
 	}
 }
 
 type FakeOktetoSelector struct {
-	dev string
 	err error
+	dev string
 }
 
 func (s *FakeOktetoSelector) AskForOptionsOkteto(_ []SelectorItem, _ int) (string, error) {
@@ -357,12 +171,15 @@ func (s *FakeOktetoSelector) AskForOptionsOkteto(_ []SelectorItem, _ int) (strin
 }
 
 func Test_SelectDevFromManifest(t *testing.T) {
+	localAbsPath, err := filepath.Abs("/")
+	assert.NoError(t, err)
+
 	tests := []struct {
-		name     string
+		err      error
 		manifest *model.Manifest
 		selector *FakeOktetoSelector
 		dev      *model.Dev
-		err      error
+		name     string
 	}{
 		{
 			name: "dev-is-selected",
@@ -380,10 +197,11 @@ func Test_SelectDevFromManifest(t *testing.T) {
 							},
 						},
 						SSHServerPort: 80,
-						Image:         &model.BuildInfo{},
+						Image:         "",
 					},
 					"test-2": &model.Dev{},
 				},
+				ManifestPath: filepath.Join(localAbsPath, "okteto.yml"),
 			},
 			selector: &FakeOktetoSelector{
 				dev: "test",
@@ -400,7 +218,7 @@ func Test_SelectDevFromManifest(t *testing.T) {
 					},
 				},
 				SSHServerPort: 80,
-				Image:         &model.BuildInfo{},
+				Image:         "",
 			},
 		},
 		{
@@ -425,6 +243,16 @@ func Test_SelectDevFromManifest(t *testing.T) {
 			err: errors.New("error-from-selector"),
 		},
 	}
+
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
+			"example": {
+				Namespace: "unit-test",
+			},
+		},
+		CurrentContext: "example",
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dev, err := SelectDevFromManifest(tt.manifest, tt.selector, tt.manifest.Dev.GetDevs())
@@ -434,7 +262,6 @@ func Test_SelectDevFromManifest(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func Test_AskYesNo(t *testing.T) {

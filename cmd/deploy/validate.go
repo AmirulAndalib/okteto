@@ -14,38 +14,27 @@
 package deploy
 
 import (
-	"fmt"
-	"strings"
+	"github.com/okteto/okteto/pkg/env"
+	"github.com/okteto/okteto/pkg/validator"
 )
 
-type envVar struct {
-	key   string
-	value string
-}
-
+// validateAndSet returns error when variables dont have expected format NAME=VALUE or NAME is not allowed
+// when variable is valid, it sets its value as env variable
 func validateAndSet(variables []string, setEnv func(key, value string) error) error {
-	envVars, err := parse(variables)
+	if err := validator.CheckReservedVariablesNameOption(variables); err != nil {
+		return err
+	}
+
+	envVars, err := env.Parse(variables)
 	if err != nil {
 		return err
 	}
 	return setOptionVarsAsEnvs(envVars, setEnv)
 }
 
-func parse(variables []string) ([]envVar, error) {
-	result := []envVar{}
+func setOptionVarsAsEnvs(variables []env.Var, setEnv func(key, value string) error) error {
 	for _, v := range variables {
-		kv := strings.SplitN(v, "=", 2)
-		if len(kv) != 2 {
-			return nil, fmt.Errorf("invalid variable value '%s': must follow KEY=VALUE format", v)
-		}
-		result = append(result, envVar{key: kv[0], value: kv[1]})
-	}
-	return result, nil
-}
-
-func setOptionVarsAsEnvs(variables []envVar, setEnv func(key, value string) error) error {
-	for _, v := range variables {
-		if err := setEnv(v.key, v.value); err != nil {
+		if err := setEnv(v.Name, v.Value); err != nil {
 			return err
 		}
 	}

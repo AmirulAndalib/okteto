@@ -33,11 +33,11 @@ func List() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
-		Args:    utils.NoArgsAccepted("https://okteto.com/docs/reference/cli/#list"),
-		Short:   "List available contexts",
+		Args:    utils.NoArgsAccepted("https://okteto.com/docs/reference/okteto-cli/#list"),
+		Short:   "List available Okteto Contexts",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			if err := NewContextCommand().Run(ctx, &ContextOptions{raiseNotCtxError: true}); err != nil {
+			if err := NewContextCommand().Run(ctx, &Options{raiseNotCtxError: true}); err != nil {
 				return err
 			}
 			return executeListContext()
@@ -48,24 +48,24 @@ func List() *cobra.Command {
 }
 
 func executeListContext() error {
-	contexts := getOktetoClusters(false)
+	contexts := getOktetoClusters()
 	contexts = append(contexts, getK8sClusters(getKubernetesContextList(true))...)
 
 	if len(contexts) == 0 {
 		return fmt.Errorf("no contexts are available. Run 'okteto context' to configure your first okteto context")
 	}
 
-	ctxStore := okteto.ContextStore()
+	ctxStore := okteto.GetContextStore()
 
-	var ctxs []okteto.OktetoContextViewer
+	var ctxs []okteto.ContextViewer
 	for _, ctxSelector := range contexts {
 		okCtx, isOkteto := ctxStore.Contexts[ctxSelector.Name]
 
-		ctxViewer := okteto.OktetoContextViewer{
+		ctxViewer := okteto.ContextViewer{
 			Name:     ctxSelector.Name,
 			Builder:  "docker",
 			Registry: "-",
-			Current:  okteto.Context().Name == ctxSelector.Name,
+			Current:  okteto.GetContext().Name == ctxSelector.Name,
 		}
 		if isOkteto {
 			ctxViewer.Registry = okCtx.Registry

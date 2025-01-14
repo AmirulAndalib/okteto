@@ -26,7 +26,7 @@ func CloneGitRepo(url string) error {
 	cmd := exec.Command("git", "clone", url)
 	o, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("cloning git repo %s failed: %s - %s", url, string(o), err)
+		return fmt.Errorf("cloning git repo %s failed: %s - %w", url, string(o), err)
 	}
 	log.Printf("clone git repo %s success", url)
 	return nil
@@ -38,7 +38,7 @@ func CloneGitRepoWithBranch(url, branch string) error {
 	cmd := exec.Command("git", "clone", "--branch", branch, url)
 	o, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("cloning git repo %s failed: %s - %s", url, string(o), err)
+		return fmt.Errorf("cloning git repo %s failed: %s - %w", url, string(o), err)
 	}
 	log.Printf("clone git repo %s success", url)
 	return nil
@@ -53,5 +53,16 @@ func DeleteGitRepo(path string) error {
 	}
 
 	log.Printf("deleted git repo %s", path)
+	return nil
+}
+
+func GitInit(path string) error {
+	log.Printf("git init %s", path)
+	cmd := exec.Command("git", "init")
+	cmd.Dir = path
+	o, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git init failed: %s - %w", string(o), err)
+	}
 	return nil
 }

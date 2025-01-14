@@ -1,38 +1,90 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package build
 
 import (
+	"errors"
 	"fmt"
-	"github.com/moby/buildkit/client"
-	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"regexp"
+
+	"github.com/moby/buildkit/client"
+	okErrors "github.com/okteto/okteto/pkg/errors"
+	oktetoLog "github.com/okteto/okteto/pkg/log"
 )
 
 type ConditionFunc func(vertex *client.Vertex) bool
 type TransformerFunc func(vertex *client.Vertex, ss *client.SolveStatus, progress string)
 
-type Rule struct {
+type LogRule struct {
 	condition   ConditionFunc
 	transformer TransformerFunc
 }
 
-type BuildKitLogsFilter struct {
-	rules []Rule
+type ErrorRule struct {
+	condition ConditionFunc
 }
 
-func NewBuildKitLogsFilter(rules []Rule) *BuildKitLogsFilter {
-	return &BuildKitLogsFilter{
-		rules: rules,
+type BuildkitLogsFilter struct {
+	transformRules []LogRule
+	errorRules     []ErrorRule
+}
+
+func NewBuildKitLogsFilter(transformRules []LogRule, errorRules []ErrorRule) *BuildkitLogsFilter {
+	return &BuildkitLogsFilter{
+		transformRules: transformRules,
+		errorRules:     errorRules,
 	}
 }
 
-func (lf *BuildKitLogsFilter) Run(ss *client.SolveStatus, progress string) {
+func (lf *BuildkitLogsFilter) Run(ss *client.SolveStatus, progress string) {
 	for _, vertex := range ss.Vertexes {
-		for _, rule := range lf.rules {
+		for _, rule := range lf.transformRules {
 			if rule.condition(vertex) {
 				rule.transformer(vertex, ss, progress)
 			}
 		}
 	}
+}
+
+func (lf *BuildkitLogsFilter) GetError(ss *client.SolveStatus) error {
+	for _, vertex := range ss.Vertexes {
+		for _, rule := range lf.errorRules {
+			if rule.condition(vertex) {
+				return okErrors.UserError{
+					E:    errors.New("docker frontend image not found"),
+					Hint: "Check your OKTETO_BUILDKIT_FRONTEND_IMAGE environment variable",
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// BuildKitFrontendNotFoundErr checks if the log contains a frontend not found error
+var BuildKitFrontendNotFoundErr ConditionFunc = func(vertex *client.Vertex) bool {
+	if vertex.Error == "" {
+		return false
+	}
+	importPattern := `resolve image config for docker-image://.*`
+
+	if !regexp.MustCompile(importPattern).MatchString(vertex.Name) {
+		return false
+	}
+
+	errorPattern := `.*: not found`
+
+	return regexp.MustCompile(errorPattern).MatchString(vertex.Error)
 }
 
 // BuildKitMissingCacheCondition checks if the log contains a missing cache error
@@ -54,7 +106,8 @@ var BuildKitMissingCacheTransformer TransformerFunc = func(vertex *client.Vertex
 	re := regexp.MustCompile(errorPattern)
 	matches := re.FindStringSubmatch(vertex.Error)
 
-	if len(matches) < 2 {
+	minMatches := 2
+	if len(matches) < minMatches {
 		return
 	}
 

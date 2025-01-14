@@ -27,38 +27,64 @@ import (
 	"github.com/okteto/okteto/pkg/analytics"
 	"github.com/okteto/okteto/pkg/config"
 	"github.com/okteto/okteto/pkg/devenvironment"
-	"github.com/okteto/okteto/pkg/errors"
+	okerrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/k8s/kubeconfig"
+	"github.com/okteto/okteto/pkg/log/io"
+	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/okteto"
+	"github.com/okteto/okteto/pkg/validator"
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/stern/stern/stern"
 )
 
-// LogsOptions options for logs command
-type LogsOptions struct {
-	All          bool
+const (
+	defaultTailOptionValue       = 100
+	defaultSinceOptionHoursValue = 48
+)
+
+// Options for logs command
+type Options struct {
 	ManifestPath string
 	Namespace    string
 	Context      string
 	exclude      string
 	Include      string
+	Name         string
 	Since        time.Duration
 	Tail         int64
 	Timestamps   bool
-	Name         string
+	All          bool
 }
 
-func Logs(ctx context.Context) *cobra.Command {
-	options := &LogsOptions{}
+func Logs(ctx context.Context, k8sLogger *io.K8sLogger, fs afero.Fs) *cobra.Command {
+	options := &Options{}
 
 	cmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Fetch the logs of your development environment",
+		Short: "Fetch the logs of your Development Environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validator.FileArgumentIsNotDir(fs, options.ManifestPath); err != nil {
+				return err
+			}
+
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			manifest, err := contextCMD.LoadManifestWithContext(ctx, contextCMD.ManifestOptions{Filename: options.ManifestPath, Namespace: options.Namespace, K8sContext: options.Context})
+			ctxOpts := &contextCMD.Options{
+				Show:      true,
+				Context:   options.Context,
+				Namespace: options.Namespace,
+			}
+			if err := contextCMD.NewContextCommand().Run(ctx, ctxOpts); err != nil {
+				return err
+			}
+
+			if !okteto.IsOkteto() {
+				return okerrors.ErrContextIsNotOktetoCluster
+			}
+
+			manifest, err := model.GetManifestV2(options.ManifestPath, afero.NewOsFs())
 			if err != nil {
 				return err
 			}
@@ -72,12 +98,12 @@ func Logs(ctx context.Context) *cobra.Command {
 				manifest.Name = options.Name
 			}
 			if manifest.Name == "" {
-				c, _, err := okteto.NewK8sClientProvider().Provide(okteto.Context().Cfg)
+				c, _, err := okteto.NewK8sClientProviderWithLogger(k8sLogger).Provide(okteto.GetContext().Cfg)
 				if err != nil {
 					return err
 				}
 				inferer := devenvironment.NewNameInferer(c)
-				manifest.Name = inferer.InferName(ctx, wd, okteto.Context().Namespace, options.ManifestPath)
+				manifest.Name = inferer.InferName(ctx, wd, okteto.GetContext().Namespace, options.ManifestPath)
 			}
 
 			if len(args) > 0 {
@@ -87,13 +113,13 @@ func Logs(ctx context.Context) *cobra.Command {
 			}
 
 			tmpKubeconfigFile := GetTempKubeConfigFile(manifest.Name)
-			if err := kubeconfig.Write(okteto.Context().Cfg, tmpKubeconfigFile); err != nil {
+			if err := kubeconfig.Write(okteto.GetContext().Cfg, tmpKubeconfigFile); err != nil {
 				return err
 			}
 			defer os.Remove(tmpKubeconfigFile)
 			c, err := getSternConfig(manifest, options, tmpKubeconfigFile)
 			if err != nil {
-				return errors.UserError{
+				return okerrors.UserError{
 					E: fmt.Errorf("invalid log configuration: %w", err),
 				}
 			}
@@ -110,24 +136,24 @@ func Logs(ctx context.Context) *cobra.Command {
 			analytics.TrackLogs(err == nil, options.All)
 
 			if err != nil {
-				return errors.UserError{
+				return okerrors.UserError{
 					E: fmt.Errorf("failed to get logs: %w", err),
 				}
 			}
 			return nil
 		},
-		Args: utils.MaximumNArgsAccepted(1, "https://www.okteto.com/docs/reference/cli/#logs"),
+		Args: utils.MaximumNArgsAccepted(1, "https://www.okteto.com/docs/reference/okteto-cli/#logs"),
 	}
 
 	cmd.Flags().BoolVarP(&options.All, "all", "a", false, "fetch logs from the whole namespace")
-	cmd.Flags().StringVarP(&options.ManifestPath, "file", "f", "", "path to the manifest file")
-	cmd.Flags().StringVarP(&options.Namespace, "namespace", "n", "", "the namespace to use to fetch the logs (defaults to the current okteto namespace)")
-	cmd.Flags().StringVarP(&options.Context, "context", "c", "", "the context to use to fetch the logs")
-	cmd.Flags().StringVarP(&options.exclude, "exclude", "e", "", "exclude by service name (regular expression)")
-	cmd.Flags().DurationVarP(&options.Since, "since", "s", 48*time.Hour, "return logs newer than a relative duration like 5s, 2m, or 3h")
-	cmd.Flags().Int64Var(&options.Tail, "tail", 100, "the number of lines from the end of the logs to show")
+	cmd.Flags().StringVarP(&options.ManifestPath, "file", "f", "", "the path to the Okteto Manifest")
+	cmd.Flags().StringVarP(&options.Namespace, "namespace", "n", "", "overwrite the current Okteto Namespace")
+	cmd.Flags().StringVarP(&options.Context, "context", "c", "", "overwrite the current Okteto Context")
+	cmd.Flags().StringVarP(&options.exclude, "exclude", "e", "", "exclude by container name (regular expression)")
+	cmd.Flags().DurationVarP(&options.Since, "since", "s", defaultSinceOptionHoursValue*time.Hour, "return logs newer than a relative duration like 5s, 2m, or 3h")
+	cmd.Flags().Int64Var(&options.Tail, "tail", defaultTailOptionValue, "the number of lines from the end of the logs to show")
 	cmd.Flags().BoolVarP(&options.Timestamps, "timestamps", "t", false, "print timestamps")
-	cmd.Flags().StringVar(&options.Name, "name", "", "development environment name")
+	cmd.Flags().StringVar(&options.Name, "name", "", "the name of the Development Environment")
 
 	return cmd
 }

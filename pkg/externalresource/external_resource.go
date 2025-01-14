@@ -1,3 +1,16 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package externalresource
 
 import (
@@ -15,14 +28,14 @@ const (
 	urlEnvFormat = "OKTETO_EXTERNAL_%s_ENDPOINTS_%s_URL"
 )
 
-// ExternalResourceSection represents the map of external resources at a manifest
-type ExternalResourceSection map[string]*ExternalResource
+// Section represents the map of external resources at a manifest
+type Section map[string]*ExternalResource
 
 // ExternalResource represents information on an external resource
 type ExternalResource struct {
-	Icon      string
-	Notes     *Notes
-	Endpoints []*ExternalEndpoint
+	Icon      string              `json:"icon,omitempty" yaml:"icon,omitempty"`
+	Notes     *Notes              `json:"notes,omitempty" yaml:"notes,omitempty"`
+	Endpoints []*ExternalEndpoint `json:"endpoints,omitempty" yaml:"endpoints,omitempty"`
 }
 
 // Notes represents information about the location and content of the external resource markdown
@@ -33,14 +46,14 @@ type Notes struct {
 
 // ExternalEndpoint represents information about an endpoint
 type ExternalEndpoint struct {
-	Name string
-	Url  string
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+	Url  string `json:"url,omitempty" yaml:"url,omitempty"`
 }
 
 // ERFilesystemManager represents ExternalResource information with the filesystem injected
 type ERFilesystemManager struct {
-	ExternalResource ExternalResource
 	Fs               afero.Fs
+	ExternalResource ExternalResource
 }
 
 func sanitizeForEnv(name string) string {
@@ -93,4 +106,8 @@ func (er *ExternalResource) SetURLUsingEnvironFile(name string, dynamicEnvs map[
 	}
 
 	return nil
+}
+
+func (es Section) IsEmpty() bool {
+	return len(es) == 0
 }

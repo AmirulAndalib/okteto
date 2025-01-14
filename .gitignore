@@ -5,6 +5,9 @@
 .idea
 .atom
 
+# VSCode Plugins
+.devcontainer
+
 # Golang binary
 cli
 .syncthing*
@@ -18,3 +21,5 @@ dist
 
 # lint
 golangci-report.xml
+
+node_modules

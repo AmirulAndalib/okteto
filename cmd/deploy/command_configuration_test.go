@@ -16,7 +16,6 @@ package deploy
 import (
 	"context"
 	"net/url"
-	"reflect"
 	"testing"
 
 	"github.com/okteto/okteto/internal/test"
@@ -27,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestGetConfigMapFromData(t *testing.T) {
@@ -38,8 +38,8 @@ deploy:
 devs:
     - api/okteto.yml
     - frontend/okteto.yml`)
-	okteto.CurrentStore = &okteto.OktetoContextStore{
-		Contexts: map[string]*okteto.OktetoContext{
+	okteto.CurrentStore = &okteto.ContextStore{
+		Contexts: map[string]*okteto.Context{
 			"test": {
 				Namespace: "test",
 			},
@@ -58,10 +58,10 @@ devs:
 	}
 
 	fakeK8sProvider := test.NewFakeK8sProvider()
-	dc := &DeployCommand{
+	dc := &Command{
 		GetManifest:       getFakeManifest,
 		K8sClientProvider: fakeK8sProvider,
-		CfgMapHandler:     newDefaultConfigMapHandler(fakeK8sProvider),
+		CfgMapHandler:     newDefaultConfigMapHandler(fakeK8sProvider, nil),
 	}
 
 	ctx := context.Background()
@@ -85,7 +85,7 @@ devs:
 		},
 	}
 
-	currentCfg, err := dc.CfgMapHandler.translateConfigMapAndDeploy(ctx, data)
+	currentCfg, err := dc.CfgMapHandler.TranslateConfigMapAndDeploy(ctx, data)
 	if err != nil {
 		t.Fatal("error trying to get configmap from data object")
 	}
@@ -97,86 +97,11 @@ devs:
 	assert.NotEmpty(t, currentCfg.Annotations[constants.LastUpdatedAnnotation])
 }
 
-func Test_mergeServicesToDeployFromOptionsAndManifest(t *testing.T) {
-	tests := []struct {
-		name             string
-		options          *Options
-		expectedServices []string
-	}{
-		{
-			name: "no manifest services to deploy",
-			options: &Options{
-				servicesToDeploy: []string{"a", "b"},
-				Manifest: &model.Manifest{
-					Deploy: &model.DeployInfo{
-						ComposeSection: &model.ComposeSectionInfo{
-							ComposesInfo: []model.ComposeInfo{},
-						},
-					},
-				},
-			},
-			expectedServices: []string{"a", "b"},
-		},
-		{
-			name: "no options services to deploy",
-			options: &Options{
-				Manifest: &model.Manifest{
-					Deploy: &model.DeployInfo{
-						ComposeSection: &model.ComposeSectionInfo{
-							ComposesInfo: []model.ComposeInfo{
-								{ServicesToDeploy: []string{"a", "b"}},
-								{ServicesToDeploy: []string{"c", "d"}},
-							},
-						},
-					},
-				},
-			},
-			expectedServices: []string{"a", "b", "c", "d"},
-		},
-		{
-			name: "both",
-			options: &Options{
-				servicesToDeploy: []string{"from command a", "from command b"},
-				Manifest: &model.Manifest{
-					Deploy: &model.DeployInfo{
-						ComposeSection: &model.ComposeSectionInfo{
-							ComposesInfo: []model.ComposeInfo{
-								{ServicesToDeploy: []string{"c", "d"}},
-							},
-						},
-					},
-				},
-			},
-			expectedServices: []string{"from command a", "from command b"},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			mergeServicesToDeployFromOptionsAndManifest(test.options)
-			// We have to check them as if they were sets to account for order
-			expected := map[string]bool{}
-			for _, service := range test.expectedServices {
-				expected[service] = true
-			}
-
-			got := map[string]bool{}
-			for _, service := range test.options.servicesToDeploy {
-				got[service] = true
-			}
-
-			if !reflect.DeepEqual(expected, got) {
-				t.Errorf("expected %v, got %v", expected, got)
-			}
-		})
-	}
-}
-
 func Test_switchSSHRepoToHTTPS(t *testing.T) {
 	tests := []struct {
+		expected *url.URL
 		name     string
 		repo     string
-		expected *url.URL
 	}{
 		{
 			name: "input-ssh",
@@ -214,6 +139,97 @@ func Test_switchSSHRepoToHTTPS(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			url := switchRepoSchemaToHTTPS(tt.repo)
 			assert.Equal(t, tt.expected, url)
+		})
+	}
+}
+func Test_getStackServicesToDeploy(t *testing.T) {
+	stack := &model.Stack{
+		Name: "test-stack",
+		Services: map[string]*model.Service{
+			"service1": {},
+			"service2": {},
+			"service3": {},
+			"service4": {},
+		},
+	}
+	tests := []struct {
+		name               string
+		composeSectionInfo *model.ComposeSectionInfo
+		expected           []string
+	}{
+		{
+			name: "MultipleComposeInfo",
+			composeSectionInfo: &model.ComposeSectionInfo{
+				ComposesInfo: []model.ComposeInfo{
+					{
+						ServicesToDeploy: []string{"service1", "service2"},
+					},
+					{
+						ServicesToDeploy: []string{"service3", "service4"},
+					},
+				},
+				Stack: stack,
+			},
+			expected: []string{"service1", "service2", "service3", "service4"},
+		},
+		{
+			name: "MultipleComposeInfo with non existent service",
+			composeSectionInfo: &model.ComposeSectionInfo{
+				ComposesInfo: []model.ComposeInfo{
+					{
+						ServicesToDeploy: []string{"service1", "service2"},
+					},
+					{
+						ServicesToDeploy: []string{"nonexistent", "service4"},
+					},
+				},
+				Stack: stack,
+			},
+			expected: []string{},
+		},
+		{
+			name: "SingleComposeInfo",
+			composeSectionInfo: &model.ComposeSectionInfo{
+				ComposesInfo: []model.ComposeInfo{
+					{
+						ServicesToDeploy: []string{"service1", "service2", "service3"},
+					},
+				},
+				Stack: stack,
+			},
+			expected: []string{"service1", "service2", "service3"},
+		},
+		{
+			name: "EmptyComposeInfo",
+			composeSectionInfo: &model.ComposeSectionInfo{
+				ComposesInfo: []model.ComposeInfo{},
+				Stack:        stack,
+			},
+			expected: []string{"service1", "service2", "service3", "service4"},
+		},
+		{
+			name: "only one docker compose",
+			composeSectionInfo: &model.ComposeSectionInfo{
+				ComposesInfo: []model.ComposeInfo{
+					{
+						File: "docker-compose.yml",
+					},
+				},
+				Stack: stack,
+			},
+			expected: []string{"service1", "service2", "service3", "service4"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			c := fake.NewSimpleClientset()
+
+			svcs, _ := getStackServicesToDeploy(ctx, tt.composeSectionInfo, c)
+
+			assert.ElementsMatch(t, tt.expected, svcs)
+
 		})
 	}
 }

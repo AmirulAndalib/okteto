@@ -20,40 +20,38 @@ import (
 	"regexp"
 	"strings"
 
-	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/utils/pointer"
-
-	"github.com/okteto/okteto/pkg/constants"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model"
 	appsv1 "k8s.io/api/apps/v1"
+	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/pointer"
 )
 
 type patchAnnotations struct {
+	Value map[string]string `json:"value"`
 	Op    string            `json:"op"`
 	Path  string            `json:"path"`
-	Value map[string]string `json:"value"`
 }
 
 // Sandbox returns a default statefulset for a given dev
-func Sandbox(dev *model.Dev) *appsv1.StatefulSet {
-	image := dev.Image.Name
+func Sandbox(dev *model.Dev, namespace string) *appsv1.StatefulSet {
+	image := dev.Image
 	if image == "" {
 		image = model.DefaultImage
 	}
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        dev.Name,
-			Namespace:   dev.Namespace,
+			Namespace:   namespace,
 			Labels:      model.Labels{},
 			Annotations: model.Annotations{},
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas: pointer.Int32Ptr(1),
+			Replicas: pointer.Int32(1),
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
 			},
@@ -71,7 +69,8 @@ func Sandbox(dev *model.Dev) *appsv1.StatefulSet {
 				},
 				Spec: apiv1.PodSpec{
 					ServiceAccountName:            dev.ServiceAccount,
-					TerminationGracePeriodSeconds: pointer.Int64Ptr(0),
+					PriorityClassName:             dev.PriorityClassName,
+					TerminationGracePeriodSeconds: pointer.Int64(0),
 					Containers: []apiv1.Container{
 						{
 							Name:            "dev",
@@ -155,7 +154,7 @@ func Destroy(ctx context.Context, name, namespace string, c kubernetes.Interface
 		if oktetoErrors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("error deleting kubernetes job: %s", err)
+		return fmt.Errorf("error deleting kubernetes job: %w", err)
 	}
 	oktetoLog.Infof("statefulset '%s' deleted", name)
 	return nil
@@ -167,16 +166,6 @@ func IsRunning(ctx context.Context, namespace, svcName string, c kubernetes.Inte
 		return false
 	}
 	return sfs.Status.ReadyReplicas > 0
-}
-
-// IsDevModeOn returns if a statefulset is in devmode
-func IsDevModeOn(s *appsv1.StatefulSet) bool {
-	labels := s.GetObjectMeta().GetLabels()
-	if labels == nil {
-		return false
-	}
-	_, ok := labels[constants.DevLabel]
-	return ok
 }
 
 // CheckConditionErrors checks errors in conditions
@@ -195,7 +184,7 @@ func CheckConditionErrors(sfs *appsv1.StatefulSet, dev *model.Dev) error {
 			} else if isResourcesRelatedError(c.Message) {
 				return getResourceLimitError(c.Message, dev)
 			}
-			return fmt.Errorf(c.Message)
+			return fmt.Errorf("%s", c.Message)
 		}
 	}
 	return nil
@@ -228,7 +217,7 @@ func getResourceLimitError(errorMessage string, dev *model.Dev) error {
 		}
 		errorToReturn += fmt.Sprintf("The value of resources.limits.memory in your okteto manifest (%s) exceeds the maximum memory limit per pod (%s). ", manifestMemory, maximumMemoryPerPod)
 	}
-	return fmt.Errorf(strings.TrimSpace(errorToReturn))
+	return fmt.Errorf("%s", strings.TrimSpace(errorToReturn))
 }
 
 // PatchAnnotations patches the statefulset annotations

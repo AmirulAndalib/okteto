@@ -19,7 +19,8 @@ import (
 
 	"github.com/okteto/okteto/pkg/constants"
 	"github.com/okteto/okteto/pkg/divert/istio"
-	"github.com/okteto/okteto/pkg/divert/weaver"
+	"github.com/okteto/okteto/pkg/divert/nginx"
+	"github.com/okteto/okteto/pkg/divert/noop"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/k8s/virtualservices"
 	"github.com/okteto/okteto/pkg/model"
@@ -36,13 +37,13 @@ type Driver interface {
 	UpdateVirtualService(vs *istioNetworkingV1beta1.VirtualService)
 }
 
-func New(m *model.Manifest, c kubernetes.Interface) (Driver, error) {
+func New(divert *model.DivertDeploy, name, namespace string, c kubernetes.Interface) (Driver, error) {
 	if !okteto.IsOkteto() {
 		return nil, oktetoErrors.ErrDivertNotSupported
 	}
 
-	if m.Deploy.Divert.Driver == constants.OktetoDivertWeaverDriver {
-		return weaver.New(m, c), nil
+	if divert.Driver == constants.OktetoDivertNginxDriver {
+		return nginx.New(divert, name, namespace, c), nil
 	}
 
 	ic, err := virtualservices.GetIstioClient()
@@ -50,5 +51,11 @@ func New(m *model.Manifest, c kubernetes.Interface) (Driver, error) {
 		return nil, fmt.Errorf("error creating istio client: %w", err)
 	}
 
-	return istio.New(m, c, ic), nil
+	return istio.New(divert, name, namespace, c, ic), nil
+}
+
+// NewNoop returns a new noop driver for divert. Useful for cases in which divert is not defined
+// in the manifest but the flow needs a driver
+func NewNoop() Driver {
+	return &noop.Driver{}
 }

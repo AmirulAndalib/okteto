@@ -20,8 +20,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/okteto/okteto/pkg/log/io"
 
 	"github.com/okteto/okteto/integration"
 	"github.com/okteto/okteto/integration/commands"
@@ -51,21 +54,23 @@ dev:
 )
 
 func TestUpWithDeploy(t *testing.T) {
-	t.Parallel()
+	t.Setenv("OKTETO_K8S_REQUESTS_LOGGER_ENABLED", "true")
 	// Prepare environment
+
 	dir := t.TempDir()
 	oktetoPath, err := integration.GetOktetoPath()
 	require.NoError(t, err)
 
-	testNamespace := integration.GetTestNamespace("TestUpWithDeploy", user)
+	testNamespace := integration.GetTestNamespace(t.Name())
 	namespaceOpts := &commands.NamespaceOptions{
 		Namespace:  testNamespace,
 		OktetoHome: dir,
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
-	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
+	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, &commands.KubeconfigOpts{
+		OktetoHome: dir,
+	}))
 	c, _, err := okteto.NewK8sClientProvider().Provide(kubeconfig.Get([]string{filepath.Join(dir, ".kube", "config")}))
 	require.NoError(t, err)
 
@@ -99,7 +104,7 @@ func TestUpWithDeploy(t *testing.T) {
 	// Test that the app image has been created correctly
 	appDeployment, err := integration.GetDeployment(context.Background(), testNamespace, model.DevCloneName("e2etest"), c)
 	require.NoError(t, err)
-	appImageDev := fmt.Sprintf("%s/%s/test:1.0.0", okteto.Context().Registry, testNamespace)
+	appImageDev := fmt.Sprintf("%s/%s/test:1.0.0", okteto.GetContext().Registry, testNamespace)
 	require.Equal(t, getImageWithSHA(appImageDev), appDeployment.Spec.Template.Spec.Containers[0].Image)
 
 	indexRemoteEndpoint := fmt.Sprintf("https://e2etest-%s.%s/index.html", testNamespace, appsSubdomain)
@@ -134,6 +139,12 @@ func TestUpWithDeploy(t *testing.T) {
 
 	require.True(t, commands.HasUpCommandFinished(upResult.Pid.Pid))
 
+	k8sLogsFilePath := filepath.Join(dir, ".okteto", io.K8sLogsFileName)
+	require.FileExists(t, k8sLogsFilePath)
+	k8sLogs, err := os.ReadFile(k8sLogsFilePath)
+	require.NoError(t, err)
+	require.Contains(t, string(k8sLogs), fmt.Sprintf("running cmd: up --deploy=true --namespace=%s", testNamespace))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func getImageWithSHA(devImage string) string {

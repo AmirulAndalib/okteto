@@ -22,11 +22,10 @@ import (
 	"github.com/okteto/okteto/pkg/okteto"
 )
 
-type ContextOptions struct {
+type Options struct {
 	Token                 string
 	Context               string
 	Namespace             string
-	Builder               string
 	OnlyOkteto            bool
 	Show                  bool
 	Save                  bool
@@ -36,22 +35,37 @@ type ContextOptions struct {
 	IsOkteto              bool
 	raiseNotCtxError      bool
 	InsecureSkipTlsVerify bool
+	InferredToken         bool
 }
 
-func (o *ContextOptions) InitFromContext() {
+func (o *Options) InitFromContext() {
 	if o.IsCtxCommand {
 		return
 	}
-	if o.Context != "" {
-		return
-	}
-	ctxStore := okteto.ContextStore()
-	if ctxStore.CurrentContext == "" {
+
+	ctxStore := okteto.GetContextStore()
+
+	if ctxStore.Contexts == nil {
 		return
 	}
 
-	if okCtx, ok := ctxStore.Contexts[ctxStore.CurrentContext]; ok {
-		o.Context = ctxStore.CurrentContext
+	if len(ctxStore.Contexts) == 0 {
+		return
+	}
+
+	cc := ctxStore.CurrentContext
+
+	if o.Context != "" {
+		cc = o.Context
+	} else {
+		o.Context = cc
+	}
+
+	if cc == "" {
+		return
+	}
+
+	if okCtx, ok := ctxStore.Contexts[cc]; ok {
 		if o.Namespace == "" {
 			o.Namespace = okCtx.Namespace
 		}
@@ -59,8 +73,8 @@ func (o *ContextOptions) InitFromContext() {
 	}
 }
 
-func (o *ContextOptions) InitFromEnvVars() {
-	usedEnvVars := []string{}
+func (o *Options) InitFromEnvVars() {
+	var usedEnvVars []string
 
 	if o.Context == "" && os.Getenv(model.OktetoURLEnvVar) != "" {
 		o.Context = os.Getenv(model.OktetoURLEnvVar)
@@ -76,16 +90,14 @@ func (o *ContextOptions) InitFromEnvVars() {
 	envToken := os.Getenv(model.OktetoTokenEnvVar)
 	if o.Token != "" || envToken != "" {
 		o.IsOkteto = true
-		if o.Context == "" {
-			o.Context = okteto.CloudURL
-		}
 	}
 
 	if o.Token == "" && envToken != "" {
-		if !okteto.HasBeenLogged(o.Context) || okteto.Context().Token != envToken {
+		if !okteto.HasBeenLogged(o.Context) || okteto.GetContext().Token != envToken {
 			usedEnvVars = append(usedEnvVars, model.OktetoTokenEnvVar)
 		}
 		o.Token = envToken
+		o.InferredToken = true
 	}
 
 	if o.Namespace == "" && os.Getenv(model.OktetoNamespaceEnvVar) != "" {
@@ -93,10 +105,11 @@ func (o *ContextOptions) InitFromEnvVars() {
 		usedEnvVars = append(usedEnvVars, model.OktetoNamespaceEnvVar)
 	}
 
-	if len(usedEnvVars) == 1 {
-		oktetoLog.Warning("Initializing context with the value of %s environment variable", usedEnvVars[0])
-	} else if len(usedEnvVars) > 1 {
-		oktetoLog.Warning("Initializing context with the value of %s and %s environment variables", strings.Join(usedEnvVars[0:len(usedEnvVars)-1], ", "), usedEnvVars[len(usedEnvVars)-1])
+	if o.Show {
+		if len(usedEnvVars) == 1 {
+			oktetoLog.Warning("Initializing context with the value of %s environment variable", usedEnvVars[0])
+		} else if len(usedEnvVars) > 1 {
+			oktetoLog.Warning("Initializing context with the value of %s and %s environment variables", strings.Join(usedEnvVars[0:len(usedEnvVars)-1], ", "), usedEnvVars[len(usedEnvVars)-1])
+		}
 	}
-
 }

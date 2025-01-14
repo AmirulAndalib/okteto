@@ -24,14 +24,17 @@ import (
 
 	buildv2 "github.com/okteto/okteto/cmd/build/v2"
 	"github.com/okteto/okteto/cmd/utils"
+	"github.com/okteto/okteto/pkg/build"
+	"github.com/okteto/okteto/pkg/config"
+	"github.com/okteto/okteto/pkg/env"
 	"github.com/okteto/okteto/pkg/format"
+	oktetoLog "github.com/okteto/okteto/pkg/log"
+	"github.com/okteto/okteto/pkg/log/io"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/okteto/okteto/pkg/types"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	apiv1 "k8s.io/api/core/v1"
-
-	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -51,6 +54,9 @@ const (
 	destroyingStatus  = "destroying"
 
 	pvcName = "pvc"
+
+	// oktetoComposeVolumeAffinityEnabledEnvVar represents whether the feature flag to enable volume affinity is enabled or not
+	oktetoComposeVolumeAffinityEnabledEnvVar = "OKTETO_COMPOSE_VOLUME_AFFINITY_ENABLED"
 )
 
 // +enum
@@ -67,9 +73,14 @@ const (
 	onDeleteUpdateStrategy updateStrategy = "on-delete"
 )
 
-func buildStackImages(ctx context.Context, s *model.Stack, options *StackDeployOptions) error {
+func buildStackImages(ctx context.Context, s *model.Stack, options *DeployOptions, analyticsTracker, insights buildTrackerInterface, ioCtrl *io.Controller) error {
 	manifest := model.NewManifestFromStack(s)
-	builder := buildv2.NewBuilderFromScratch()
+
+	onBuildFinish := []buildv2.OnBuildFinish{
+		analyticsTracker.TrackImageBuild,
+		insights.TrackImageBuild,
+	}
+	builder := buildv2.NewBuilderFromScratch(ioCtrl, onBuildFinish)
 	if options.ForceBuild {
 		buildOptions := &types.BuildOptions{
 			Manifest:    manifest,
@@ -79,7 +90,7 @@ func buildStackImages(ctx context.Context, s *model.Stack, options *StackDeployO
 			return err
 		}
 	} else {
-		svcsToBuild, err := builder.GetServicesToBuild(ctx, manifest, options.ServicesToDeploy)
+		svcsToBuild, err := builder.GetServicesToBuildDuringExecution(ctx, manifest, options.ServicesToDeploy)
 		if err != nil {
 			return err
 		}
@@ -103,7 +114,8 @@ func translateConfigMap(s *model.Stack) *apiv1.ConfigMap {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: model.GetStackConfigMapName(s.Name),
 			Labels: map[string]string{
-				model.StackLabel: "true",
+				model.StackLabel:      "true",
+				model.DeployedByLabel: format.ResourceK8sMetaString(s.Name),
 			},
 		},
 		Data: map[string]string{
@@ -114,10 +126,34 @@ func translateConfigMap(s *model.Stack) *apiv1.ConfigMap {
 	}
 }
 
-func translateDeployment(svcName string, s *model.Stack) *appsv1.Deployment {
+func translateDeployment(svcName string, s *model.Stack, divert Divert) *appsv1.Deployment {
 	svc := s.Services[svcName]
 
 	svcHealthchecks := getSvcHealthProbe(svc)
+
+	podSpec := apiv1.PodSpec{
+		TerminationGracePeriodSeconds: pointer.Int64(svc.StopGracePeriod),
+		NodeSelector:                  svc.NodeSelector,
+		Containers: []apiv1.Container{
+			{
+				Name:            svcName,
+				Image:           svc.Image,
+				Command:         svc.Entrypoint.Values,
+				Args:            svc.Command.Values,
+				Env:             translateServiceEnvironment(svc),
+				Ports:           translateContainerPorts(svc),
+				SecurityContext: translateSecurityContext(svc),
+				Resources:       translateResources(svc),
+				WorkingDir:      svc.Workdir,
+				ReadinessProbe:  svcHealthchecks.readiness,
+				LivenessProbe:   svcHealthchecks.liveness,
+			},
+		},
+	}
+
+	if divert != nil {
+		podSpec = divert.UpdatePod(podSpec)
+	}
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -127,7 +163,7 @@ func translateDeployment(svcName string, s *model.Stack) *appsv1.Deployment {
 			Annotations: translateAnnotations(svc),
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: pointer.Int32Ptr(svc.Replicas),
+			Replicas: pointer.Int32(svc.Replicas),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: translateLabelSelector(svcName, s),
 			},
@@ -137,25 +173,7 @@ func translateDeployment(svcName string, s *model.Stack) *appsv1.Deployment {
 					Labels:      translateLabels(svcName, s),
 					Annotations: translateAnnotations(svc),
 				},
-				Spec: apiv1.PodSpec{
-					TerminationGracePeriodSeconds: pointer.Int64Ptr(svc.StopGracePeriod),
-					NodeSelector:                  svc.NodeSelector,
-					Containers: []apiv1.Container{
-						{
-							Name:            svcName,
-							Image:           svc.Image,
-							Command:         svc.Entrypoint.Values,
-							Args:            svc.Command.Values,
-							Env:             translateServiceEnvironment(svc),
-							Ports:           translateContainerPorts(svc),
-							SecurityContext: translateSecurityContext(svc),
-							Resources:       translateResources(svc),
-							WorkingDir:      svc.Workdir,
-							ReadinessProbe:  svcHealthchecks.readiness,
-							LivenessProbe:   svcHealthchecks.liveness,
-						},
-					},
-				},
+				Spec: podSpec,
 			},
 		},
 	}
@@ -184,11 +202,39 @@ func translatePersistentVolumeClaim(volumeName string, s *model.Stack) apiv1.Per
 	return pvc
 }
 
-func translateStatefulSet(svcName string, s *model.Stack) *appsv1.StatefulSet {
+func translateStatefulSet(svcName string, s *model.Stack, divert Divert) *appsv1.StatefulSet {
 	svc := s.Services[svcName]
 
 	initContainers := getInitContainers(svcName, s)
 	svcHealthchecks := getSvcHealthProbe(svc)
+
+	podSpec := apiv1.PodSpec{
+		TerminationGracePeriodSeconds: pointer.Int64(svc.StopGracePeriod),
+		InitContainers:                initContainers,
+		Affinity:                      translateAffinity(svc),
+		NodeSelector:                  svc.NodeSelector,
+		Volumes:                       translateVolumes(svc),
+		Containers: []apiv1.Container{
+			{
+				Name:            svcName,
+				Image:           svc.Image,
+				Command:         svc.Entrypoint.Values,
+				Args:            svc.Command.Values,
+				Env:             translateServiceEnvironment(svc),
+				Ports:           translateContainerPorts(svc),
+				SecurityContext: translateSecurityContext(svc),
+				VolumeMounts:    translateVolumeMounts(svc),
+				Resources:       translateResources(svc),
+				WorkingDir:      svc.Workdir,
+				ReadinessProbe:  svcHealthchecks.readiness,
+				LivenessProbe:   svcHealthchecks.liveness,
+			},
+		},
+	}
+
+	if divert != nil {
+		podSpec = divert.UpdatePod(podSpec)
+	}
 
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -198,8 +244,8 @@ func translateStatefulSet(svcName string, s *model.Stack) *appsv1.StatefulSet {
 			Annotations: translateAnnotations(svc),
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas:             pointer.Int32Ptr(svc.Replicas),
-			RevisionHistoryLimit: pointer.Int32Ptr(2),
+			Replicas:             pointer.Int32(svc.Replicas),
+			RevisionHistoryLimit: pointer.Int32(2),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: translateLabelSelector(svcName, s),
 			},
@@ -210,40 +256,47 @@ func translateStatefulSet(svcName string, s *model.Stack) *appsv1.StatefulSet {
 					Labels:      translateLabels(svcName, s),
 					Annotations: translateAnnotations(svc),
 				},
-				Spec: apiv1.PodSpec{
-					TerminationGracePeriodSeconds: pointer.Int64Ptr(svc.StopGracePeriod),
-					InitContainers:                initContainers,
-					Affinity:                      translateAffinity(svc),
-					NodeSelector:                  svc.NodeSelector,
-					Volumes:                       translateVolumes(svc),
-					Containers: []apiv1.Container{
-						{
-							Name:            svcName,
-							Image:           svc.Image,
-							Command:         svc.Entrypoint.Values,
-							Args:            svc.Command.Values,
-							Env:             translateServiceEnvironment(svc),
-							Ports:           translateContainerPorts(svc),
-							SecurityContext: translateSecurityContext(svc),
-							VolumeMounts:    translateVolumeMounts(svc),
-							Resources:       translateResources(svc),
-							WorkingDir:      svc.Workdir,
-							ReadinessProbe:  svcHealthchecks.readiness,
-							LivenessProbe:   svcHealthchecks.liveness,
-						},
-					},
-				},
+				Spec: podSpec,
 			},
 			VolumeClaimTemplates: translateVolumeClaimTemplates(svcName, s),
 		},
 	}
 }
 
-func translateJob(svcName string, s *model.Stack) *batchv1.Job {
+func translateJob(svcName string, s *model.Stack, divert Divert) *batchv1.Job {
 	svc := s.Services[svcName]
 
 	initContainers := getInitContainers(svcName, s)
 	svcHealthchecks := getSvcHealthProbe(svc)
+	podSpec := apiv1.PodSpec{
+		RestartPolicy:                 svc.RestartPolicy,
+		TerminationGracePeriodSeconds: pointer.Int64(svc.StopGracePeriod),
+		InitContainers:                initContainers,
+		Affinity:                      translateAffinity(svc),
+		NodeSelector:                  svc.NodeSelector,
+		Containers: []apiv1.Container{
+			{
+				Name:            svcName,
+				Image:           svc.Image,
+				Command:         svc.Entrypoint.Values,
+				Args:            svc.Command.Values,
+				Env:             translateServiceEnvironment(svc),
+				Ports:           translateContainerPorts(svc),
+				SecurityContext: translateSecurityContext(svc),
+				VolumeMounts:    translateVolumeMounts(svc),
+				Resources:       translateResources(svc),
+				WorkingDir:      svc.Workdir,
+				ReadinessProbe:  svcHealthchecks.readiness,
+				LivenessProbe:   svcHealthchecks.liveness,
+			},
+		},
+		Volumes: translateVolumes(svc),
+	}
+
+	if divert != nil {
+		podSpec = divert.UpdatePod(podSpec)
+	}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        svcName,
@@ -252,38 +305,15 @@ func translateJob(svcName string, s *model.Stack) *batchv1.Job {
 			Annotations: translateAnnotations(svc),
 		},
 		Spec: batchv1.JobSpec{
-			Completions:  pointer.Int32Ptr(svc.Replicas),
-			Parallelism:  pointer.Int32Ptr(1),
+			Completions:  pointer.Int32(svc.Replicas),
+			Parallelism:  pointer.Int32(1),
 			BackoffLimit: &svc.BackOffLimit,
 			Template: apiv1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      translateLabels(svcName, s),
 					Annotations: translateAnnotations(svc),
 				},
-				Spec: apiv1.PodSpec{
-					RestartPolicy:                 svc.RestartPolicy,
-					TerminationGracePeriodSeconds: pointer.Int64Ptr(svc.StopGracePeriod),
-					InitContainers:                initContainers,
-					Affinity:                      translateAffinity(svc),
-					NodeSelector:                  svc.NodeSelector,
-					Containers: []apiv1.Container{
-						{
-							Name:            svcName,
-							Image:           svc.Image,
-							Command:         svc.Entrypoint.Values,
-							Args:            svc.Command.Values,
-							Env:             translateServiceEnvironment(svc),
-							Ports:           translateContainerPorts(svc),
-							SecurityContext: translateSecurityContext(svc),
-							VolumeMounts:    translateVolumeMounts(svc),
-							Resources:       translateResources(svc),
-							WorkingDir:      svc.Workdir,
-							ReadinessProbe:  svcHealthchecks.readiness,
-							LivenessProbe:   svcHealthchecks.liveness,
-						},
-					},
-					Volumes: translateVolumes(svc),
-				},
+				Spec: podSpec,
 			},
 		},
 	}
@@ -308,10 +338,11 @@ func getInitContainers(svcName string, s *model.Stack) []apiv1.Container {
 func getAddPermissionsInitContainer(svcName string, svc *model.Service) apiv1.Container {
 	initContainerCommand, initContainerVolumeMounts := getInitContainerCommandAndVolumeMounts(*svc)
 	initContainer := apiv1.Container{
-		Name:         fmt.Sprintf("init-%s", svcName),
-		Image:        "busybox",
-		Command:      initContainerCommand,
-		VolumeMounts: initContainerVolumeMounts,
+		Name:            fmt.Sprintf("init-%s", svcName),
+		Image:           config.NewImageConfig(oktetoLog.GetOutputWriter()).GetOktetoImage(),
+		ImagePullPolicy: apiv1.PullIfNotPresent,
+		Command:         initContainerCommand,
+		VolumeMounts:    initContainerVolumeMounts,
 	}
 	return initContainer
 }
@@ -453,6 +484,7 @@ func translateVolumeLabels(volumeName string, s *model.Stack) map[string]string 
 	labels := map[string]string{
 		model.StackNameLabel:       format.ResourceK8sMetaString(s.Name),
 		model.StackVolumeNameLabel: volumeName,
+		model.DeployedByLabel:      format.ResourceK8sMetaString(s.Name),
 	}
 	for k := range volume.Labels {
 		labels[k] = volume.Labels[k]
@@ -461,6 +493,10 @@ func translateVolumeLabels(volumeName string, s *model.Stack) map[string]string 
 }
 
 func translateAffinity(svc *model.Service) *apiv1.Affinity {
+	if !env.LoadBooleanOrDefault(oktetoComposeVolumeAffinityEnabledEnvVar, true) {
+		return nil
+	}
+
 	requirements := make([]apiv1.PodAffinityTerm, 0)
 	for _, volume := range svc.Volumes {
 		if volume.LocalPath == "" {
@@ -495,6 +531,7 @@ func translateLabels(svcName string, s *model.Stack) map[string]string {
 	labels := map[string]string{
 		model.StackNameLabel:        format.ResourceK8sMetaString(s.Name),
 		model.StackServiceNameLabel: svcName,
+		model.DeployedByLabel:       format.ResourceK8sMetaString(s.Name),
 	}
 	for k := range svc.Labels {
 		labels[k] = svc.Labels[k]
@@ -517,7 +554,6 @@ func translateLabelSelector(svcName string, s *model.Stack) map[string]string {
 }
 
 func translateAnnotations(svc *model.Service) map[string]string {
-
 	result := getAnnotations()
 	for k, v := range svc.Annotations {
 		result[k] = v
@@ -554,7 +590,7 @@ func translateVolumeMounts(svc *model.Service) []apiv1.VolumeMount {
 	return result
 }
 
-func getVolumeClaimName(v *model.StackVolume) string {
+func getVolumeClaimName(v *build.VolumeMounts) string {
 	var name string
 	if v.LocalPath != "" {
 		name = v.LocalPath
@@ -618,7 +654,7 @@ func translateServicePorts(svc model.Service) []apiv1.ServicePort {
 				result,
 				apiv1.ServicePort{
 					Name:       fmt.Sprintf("p-%d-%d-%s", p.ContainerPort, p.ContainerPort, strings.ToLower(fmt.Sprintf("%v", p.Protocol))),
-					Port:       int32(p.ContainerPort),
+					Port:       p.ContainerPort,
 					TargetPort: intstr.IntOrString{IntVal: p.ContainerPort},
 					Protocol:   p.Protocol,
 				},
@@ -629,7 +665,7 @@ func translateServicePorts(svc model.Service) []apiv1.ServicePort {
 				result,
 				apiv1.ServicePort{
 					Name:       fmt.Sprintf("p-%d-%d-%s", p.HostPort, p.ContainerPort, strings.ToLower(fmt.Sprintf("%v", p.Protocol))),
-					Port:       int32(p.HostPort),
+					Port:       p.HostPort,
 					TargetPort: intstr.IntOrString{IntVal: p.ContainerPort},
 					Protocol:   p.Protocol,
 				},
@@ -779,14 +815,14 @@ func getUpdateStrategy(svc *model.Service, strategy updateStrategyGetter) update
 		if err == nil {
 			return result
 		}
-		oktetoLog.Debugf("invalid strategy: %w", err)
+		oktetoLog.Debugf("invalid strategy: %s", err)
 	}
 	if result := getUpdateStrategyByEnvVar(); result != "" {
 		err := strategy.validate(result)
 		if err == nil {
 			return result
 		}
-		oktetoLog.Debugf("invalid strategy: %w", err)
+		oktetoLog.Debugf("invalid strategy: %s", err)
 	}
 	return strategy.getDefault()
 }

@@ -30,7 +30,9 @@ import (
 )
 
 const (
-	syncthingVersion = "1.24.0"
+	syncthingVersion          = "1.29.2"
+	syncthingVersionStringNew = 3
+	syncthingVersionStringOld = 2
 )
 
 var (
@@ -75,19 +77,19 @@ func Install(p getter.ProgressTracker) error {
 	defer os.RemoveAll(dir)
 
 	if err := client.Get(); err != nil {
-		return fmt.Errorf("failed to download syncthing from %s: %s", client.Src, err)
+		return fmt.Errorf("failed to download syncthing from %s: %w", client.Src, err)
 	}
 
 	i := getInstallPath()
 	b := getBinaryPathInDownload(dir, downloadURL)
 
 	if _, err := os.Stat(b); err != nil {
-		return fmt.Errorf("%s didn't include the syncthing binary: %s", downloadURL, err)
+		return fmt.Errorf("%s didn't include the syncthing binary: %w", downloadURL, err)
 	}
 
 	// skipcq GSC-G302 syncthing is a binary so it needs exec permissions
 	if err := os.Chmod(b, 0700); err != nil {
-		return fmt.Errorf("failed to set permissions to %s: %s", b, err)
+		return fmt.Errorf("failed to set permissions to %s: %w", b, err)
 	}
 
 	if filesystem.FileExists(i) {
@@ -97,7 +99,7 @@ func Install(p getter.ProgressTracker) error {
 	}
 
 	if err := filesystem.CopyFile(b, i); err != nil {
-		return fmt.Errorf("failed to write %s: %s", i, err)
+		return fmt.Errorf("failed to write %s: %w", i, err)
 	}
 
 	oktetoLog.Infof("downloaded syncthing %s to %s", syncthingVersion, i)
@@ -156,9 +158,9 @@ func parseVersionFromOutput(output []byte) (*semver.Version, error) {
 
 	v := ""
 	switch len(found) {
-	case 3:
+	case syncthingVersionStringNew:
 		v = fmt.Sprintf("%s%s", found[1], found[2])
-	case 2:
+	case syncthingVersionStringOld:
 		v = fmt.Sprint(found[1])
 	default:
 		return nil, fmt.Errorf("failed to extract the version from `%s`", output)
@@ -166,7 +168,7 @@ func parseVersionFromOutput(output []byte) (*semver.Version, error) {
 
 	s, err := semver.NewVersion(v)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse the current syncthing version `%s`: %s", v, err)
+		return nil, fmt.Errorf("failed to parse the current syncthing version `%s`: %w", v, err)
 	}
 
 	return s, nil

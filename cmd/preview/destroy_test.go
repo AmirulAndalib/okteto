@@ -1,8 +1,23 @@
+// Copyright 2023 The Okteto Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package preview
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/okteto/okteto/internal/test/client"
 	"github.com/okteto/okteto/pkg/constants"
@@ -38,11 +53,39 @@ func TestExecuteDestroyPreviewWithErrorDestroying(t *testing.T) {
 	require.Equal(t, 0, previewResponse.DestroySuccessCount)
 }
 
-func TestExecuteDestroyPreviewWithoutError(t *testing.T) {
+// TestExecuteDestroyPreviewWithNotFoundPreviewErrorDestroying tests the case when the preview is not found
+// not return an error
+func TestExecuteDestroyPreviewWithNotFoundPreviewErrorDestroying(t *testing.T) {
 	ctx := context.Background()
 	opts := &DestroyOptions{
 		name: "test-preview",
 		wait: true,
+	}
+	previewResponse := client.FakePreviewResponse{
+		ErrDestroyPreview: fmt.Errorf("preview-not-found"),
+	}
+	command := destroyPreviewCommand{
+		okClient: &client.FakeOktetoClient{
+			Preview: client.NewFakePreviewClient(
+				&previewResponse,
+			),
+			StreamClient: client.NewFakeStreamClient(&client.FakeStreamResponse{}),
+		},
+		k8sClient: fake.NewSimpleClientset(),
+	}
+
+	err := command.executeDestroyPreview(ctx, opts)
+
+	require.NoError(t, err)
+	require.Equal(t, 0, previewResponse.DestroySuccessCount)
+}
+
+func TestExecuteDestroyPreviewWithoutError(t *testing.T) {
+	ctx := context.Background()
+	opts := &DestroyOptions{
+		name:    "test-preview",
+		wait:    true,
+		timeout: 5 * time.Minute,
 	}
 	var previewResponse client.FakePreviewResponse
 	command := destroyPreviewCommand{
@@ -87,8 +130,9 @@ func TestExecuteDestroyPreviewWithoutWait(t *testing.T) {
 func TestExecuteDestroyPreviewWithFailedJob(t *testing.T) {
 	ctx := context.Background()
 	opts := &DestroyOptions{
-		name: "test-preview",
-		wait: true,
+		name:    "test-preview",
+		wait:    true,
+		timeout: 5 * time.Minute,
 	}
 	var previewResponse client.FakePreviewResponse
 	ns := v1.Namespace{
@@ -119,8 +163,9 @@ func TestExecuteDestroyPreviewWithErrorStreaming(t *testing.T) {
 	ctx := context.Background()
 	var previewResponse client.FakePreviewResponse
 	opts := &DestroyOptions{
-		name: "test-preview",
-		wait: true,
+		name:    "test-preview",
+		wait:    true,
+		timeout: 5 * time.Minute,
 	}
 	command := destroyPreviewCommand{
 		okClient: &client.FakeOktetoClient{

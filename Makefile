@@ -33,7 +33,31 @@ latest:
 .PHONY: lint
 lint:
 	pre-commit run --all-files
-	golangci-lint run
+	golangci-lint run -v --timeout 5m
+
+.PHONY: lint-fix
+lint-fix:
+	golangci-lint run --fix --timeout 5m
+
+.PHONY: install-fieldalignment
+install-fieldalignment:
+	$(eval GOBIN=$(shell go env GOPATH)/bin)
+	$(eval FIELDALIGNMENT_BIN=$(GOBIN)/fieldalignment)
+	@if [ ! -x "$(FIELDALIGNMENT_BIN)" ]; then \
+    	echo "Installing fieldalignment..."; \
+    	go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@latest; \
+    fi
+
+.PHONY: lint-fix-fieldalignment
+lint-fix-fieldalignment: install-fieldalignment
+	@$(FIELDALIGNMENT_BIN) -fix ./...; \
+	if ! git diff --quiet -- '*.go'; then \
+		echo "⚠️  Please review the changes before committing. This step might remove code comments while reordering the struct fields."; \
+	fi
+
+.PHONY: lint-fieldalignment
+lint-fieldalignment: install-fieldalignment
+	@$(FIELDALIGNMENT_BIN) -json ./...
 
 .PHONY: test
 test:
@@ -63,9 +87,9 @@ integration-okteto:
 integration-up:
 	go test github.com/okteto/okteto/integration/up -tags="integration" --count=1 -v -timeout 45m
 
-.PHONY: integration-deprecated
-integration-deprecated:
-	go test github.com/okteto/okteto/integration/deprecated/push -tags="integration" --count=1 -v -timeout 15m && go test github.com/okteto/okteto/integration/deprecated/stack -tags="integration" --count=1 -v -timeout 15m
+.PHONY: integration-okteto-test
+integration-okteto-test:
+	go test github.com/okteto/okteto/integration/test -tags="integration" --count=1 -v -timeout 45m
 
 .PHONY: build
 build:
@@ -83,3 +107,7 @@ dep:
 codecov:
 	go test -coverprofile=coverage.txt ./...
 	go tool cover -html=coverage.txt -o coverage.html
+
+.PHONY: generate-schema
+generate-schema:
+	go run . generate-schema -o schema.json

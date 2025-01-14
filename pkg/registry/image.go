@@ -21,7 +21,6 @@ import (
 	containerv1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/okteto/okteto/pkg/constants"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
-	"github.com/okteto/okteto/pkg/model"
 	apiv1 "k8s.io/api/core/v1"
 )
 
@@ -34,8 +33,8 @@ type ImageMetadata struct {
 }
 
 type Port struct {
-	ContainerPort int32
 	Protocol      apiv1.Protocol
+	ContainerPort int32
 }
 
 func (Port) GetHostPort() int32            { return 0 }
@@ -75,12 +74,23 @@ func (ic ImageCtrl) ExpandOktetoGlobalRegistry(tag string) string {
 	if ic.config.GetGlobalNamespace() != "" {
 		globalNamespace = ic.config.GetGlobalNamespace()
 	}
-	return ic.registryReplacer.Replace(tag, constants.GlobalRegistry, globalNamespace)
+
+	tags := strings.Split(tag, ",")
+	result := ""
+	for _, t := range tags {
+		result += ic.registryReplacer.Replace(t, constants.GlobalRegistry, globalNamespace) + ","
+	}
+	return strings.TrimSuffix(result, ",")
 }
 
 // ExpandOktetoDevRegistry translates okteto.dev
 func (ic ImageCtrl) ExpandOktetoDevRegistry(tag string) string {
-	return ic.registryReplacer.Replace(tag, constants.DevRegistry, ic.config.GetNamespace())
+	tags := strings.Split(tag, ",")
+	result := ""
+	for _, t := range tags {
+		result += ic.registryReplacer.Replace(t, constants.DevRegistry, ic.config.GetNamespace()) + ","
+	}
+	return strings.TrimSuffix(result, ",")
 }
 
 // GetRegistryAndRepo returns image tag and the registry to push the image
@@ -91,7 +101,7 @@ func (ImageCtrl) GetRegistryAndRepo(tag string) (string, string) {
 
 	if len(splittedImage) == 1 {
 		imageTag = splittedImage[0]
-	} else if len(splittedImage) == 2 {
+	} else if len(splittedImage) == 2 { //nolint:mnd
 		if strings.Contains(splittedImage[0], ".") {
 			return splittedImage[0], splittedImage[1]
 		}
@@ -137,32 +147,11 @@ func (ImageCtrl) getExposedPortsFromCfg(cfg *containerv1.ConfigFile) []Port {
 			port = port[:slashIndx]
 			portInt, err := strconv.ParseInt(port, 10, 32)
 			if err != nil {
-				oktetoLog.Debugf("could not parse exposed port %s: %w", port, err)
+				oktetoLog.Debugf("could not parse exposed port %s: %s", port, err)
 				continue
 			}
 			result = append(result, Port{ContainerPort: int32(portInt), Protocol: apiv1.ProtocolTCP})
 		}
 	}
 	return result
-}
-
-func GetDevTagFromGlobal(image string) string {
-	if !strings.HasPrefix(image, constants.GlobalRegistry) {
-		return ""
-	}
-
-	// separate image reference and tag eg: okteto.dev/image:tag
-	reference, _, found := strings.Cut(image, "@sha256")
-	if !found {
-		reference, _, found = strings.Cut(image, ":")
-		if !found {
-			return ""
-		}
-	}
-
-	devReference := strings.Replace(reference, constants.GlobalRegistry, constants.DevRegistry, 1)
-	if devReference == reference {
-		return ""
-	}
-	return fmt.Sprintf("%s:%s", devReference, model.OktetoDefaultImageTag)
 }

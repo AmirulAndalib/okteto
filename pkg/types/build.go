@@ -13,9 +13,7 @@
 
 package types
 
-import (
-	"github.com/okteto/okteto/pkg/model"
-)
+import "github.com/okteto/okteto/pkg/model"
 
 // BuildSshSession is a reference to an ssh session which translates to a
 // --mount=ssh,id={id} argument in a buildkit run.
@@ -34,28 +32,26 @@ type HostMap struct {
 
 // BuildOptions define the options available for build
 type BuildOptions struct {
-	BuildArgs     []string
-	CacheFrom     []string
-	File          string
-	NoCache       bool
-	OutputMode    string
-	Path          string
-	Secrets       []string
-	Platform      string
-	Tag           string
-	Target        string
-	Namespace     string
-	BuildToGlobal bool
-	K8sContext    string
-	ExportCache   []string
+	Manifest *model.Manifest
+	// LocalOutputPath sets for remote operation the root path to where the
+	// exported files are written to
+	LocalOutputPath string
+	File            string
+	OutputMode      string
+	Path            string
+	Platform        string
+	Tag             string
+	Target          string
+	Namespace       string
+	K8sContext      string
+	BuildArgs       []string
+	Secrets         []string
+	ExportCache     []string
 	// CommandArgs comes from the user input on the command
 	CommandArgs  []string
+	SshSessions  []BuildSshSession
+	ExtraHosts   []HostMap
+	CacheFrom    []string
+	NoCache      bool
 	EnableStages bool
-
-	SshSessions []BuildSshSession
-
-	Manifest *model.Manifest
-	DevTag   string
-
-	ExtraHosts []HostMap
 }

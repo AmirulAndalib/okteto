@@ -16,11 +16,10 @@ package okteto
 import (
 	"context"
 	"crypto/tls"
+	"net/http"
 	"os"
 	"reflect"
 	"testing"
-
-	"net/http"
 
 	"github.com/okteto/okteto/pkg/constants"
 	"golang.org/x/oauth2"
@@ -110,9 +109,9 @@ func (fc *fakeGraphQLMultipleCallsClient) Mutate(ctx context.Context, m interfac
 
 func TestInDevContainer(t *testing.T) {
 	v := os.Getenv(constants.OktetoNameEnvVar)
-	os.Setenv(constants.OktetoNameEnvVar, "")
+	t.Setenv(constants.OktetoNameEnvVar, "")
 	defer func() {
-		os.Setenv(constants.OktetoNameEnvVar, v)
+		t.Setenv(constants.OktetoNameEnvVar, v)
 	}()
 
 	in := InDevContainer()
@@ -120,13 +119,13 @@ func TestInDevContainer(t *testing.T) {
 		t.Errorf("in dev container when there was no marker env var")
 	}
 
-	os.Setenv(constants.OktetoNameEnvVar, "")
+	t.Setenv(constants.OktetoNameEnvVar, "")
 	in = InDevContainer()
 	if in {
 		t.Errorf("in dev container when there was an empty marker env var")
 	}
 
-	os.Setenv(constants.OktetoNameEnvVar, "1")
+	t.Setenv(constants.OktetoNameEnvVar, "1")
 	in = InDevContainer()
 	if !in {
 		t.Errorf("not in dev container when there was a marker env var")
@@ -142,13 +141,13 @@ func Test_parseOktetoURL(t *testing.T) {
 	}{
 		{
 			name: "basic",
-			u:    "https://cloud.okteto.com",
-			want: "https://cloud.okteto.com/graphql",
+			u:    "https://okteto.example.com",
+			want: "https://okteto.example.com/graphql",
 		},
 		{
 			name: "no-schema",
-			u:    "cloud.okteto.com",
-			want: "https://cloud.okteto.com/graphql",
+			u:    "okteto.example.com",
+			want: "https://okteto.example.com/graphql",
 		},
 		{
 			name:    "empty",
@@ -172,8 +171,8 @@ func Test_parseOktetoURL(t *testing.T) {
 
 func TestBackgroundContextWithHttpClient(t *testing.T) {
 	tests := []struct {
-		name       string
 		httpClient *http.Client
+		name       string
 		expected   bool
 	}{
 		{

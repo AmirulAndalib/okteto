@@ -15,6 +15,7 @@ package test
 
 import (
 	"github.com/okteto/okteto/pkg/k8s/ingresses"
+	"github.com/okteto/okteto/pkg/log/io"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -23,11 +24,11 @@ import (
 )
 
 type FakeK8sProvider struct {
-	objects             []runtime.Object
-	client              *fake.Clientset
-	restConfig          *rest.Config
 	errGetIngressClient error
 	ErrProvide          error
+	client              *fake.Clientset
+	restConfig          *rest.Config
+	objects             []runtime.Object
 }
 
 func NewFakeK8sProvider(objects ...runtime.Object) *FakeK8sProvider {
@@ -53,6 +54,10 @@ func (f *FakeK8sProvider) Provide(_ *clientcmdapi.Config) (kubernetes.Interface,
 
 	f.client = c
 	return c, f.restConfig, nil
+}
+
+func (f *FakeK8sProvider) ProvideWithLogger(c *clientcmdapi.Config, _ *io.K8sLogger) (kubernetes.Interface, *rest.Config, error) {
+	return f.Provide(c)
 }
 
 func (f *FakeK8sProvider) GetIngressClient() (*ingresses.Client, error) {

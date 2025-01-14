@@ -29,9 +29,8 @@ import (
 )
 
 var (
-	user          = ""
 	kubectlBinary = "kubectl"
-	appsSubdomain = "cloud.okteto.net"
+	appsSubdomain = ""
 	token         = ""
 )
 
@@ -40,13 +39,6 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	if u, ok := os.LookupEnv(model.OktetoUserEnvVar); !ok {
-		log.Println("OKTETO_USER is not defined")
-		os.Exit(1)
-	} else {
-		user = u
-	}
-
 	if v := os.Getenv(model.OktetoAppsSubdomainEnvVar); v != "" {
 		appsSubdomain = v
 	}
@@ -58,6 +50,7 @@ func TestMain(m *testing.M) {
 		log.Printf("kubectl is not in the path: %s", err)
 		os.Exit(1)
 	}
+	os.Setenv("OKTETO_MULTILINE_LOCAL_VAR", "value1\nvalue2\nvalue3")
 
 	token = integration.GetToken()
 	exitCode := m.Run()

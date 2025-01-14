@@ -32,8 +32,18 @@ const (
 
 // UpMetricsMetadata defines the properties of the Up event we want to track
 type UpMetricsMetadata struct {
-	isV2                     bool
-	manifestType             model.Archetype
+	manifestType   model.Archetype
+	mode           string
+	reconnectCause string
+
+	activateDuration             time.Duration
+	initialSyncDuration          time.Duration
+	oktetoCtxConfigDuration      time.Duration
+	devContainerCreationDuration time.Duration
+	contextSyncDuration          time.Duration
+	localFoldersScanDuration     time.Duration
+	execDuration                 time.Duration
+
 	isInteractive            bool
 	isOktetoRepository       bool
 	hasDependenciesSection   bool
@@ -41,24 +51,14 @@ type UpMetricsMetadata struct {
 	hasDeploySection         bool
 	hasReverse               bool
 	isHybridDev              bool
-	mode                     string
 	failActivate             bool
-	activateDuration         time.Duration
-	initialSyncDuration      time.Duration
 	isReconnect              bool
-	reconnectCause           string
 	errSync                  bool
 	errSyncResetDatabase     bool
 	errSyncInsufficientSpace bool
 	errSyncLostSyncthing     bool
 	success                  bool
-
-	hasRunDeploy                 bool
-	oktetoCtxConfigDuration      time.Duration
-	devContainerCreationDuration time.Duration
-	contextSyncDuration          time.Duration
-	localFoldersScanDuration     time.Duration
-	execDuration                 time.Duration
+	hasRunDeploy             bool
 }
 
 // NewUpMetricsMetadata returns an empty instance of UpMetricsMetadata
@@ -70,7 +70,6 @@ func NewUpMetricsMetadata() *UpMetricsMetadata {
 func (u *UpMetricsMetadata) toProps() map[string]interface{} {
 	return map[string]interface{}{
 		"isInteractive":                       u.isInteractive,
-		"isV2":                                u.isV2,
 		"manifestType":                        u.manifestType,
 		"isOktetoRepository":                  u.isOktetoRepository,
 		"hasDependenciesSection":              u.hasDependenciesSection,
@@ -98,7 +97,6 @@ func (u *UpMetricsMetadata) toProps() map[string]interface{} {
 
 // ManifestProps adds the tracking properties of the repository manifest
 func (u *UpMetricsMetadata) ManifestProps(m *model.Manifest) {
-	u.isV2 = m.IsV2
 	u.manifestType = m.Type
 	u.hasDependenciesSection = m.HasDependenciesSection()
 	u.hasBuildSection = m.HasBuildSection()
@@ -149,17 +147,17 @@ func (u *UpMetricsMetadata) ErrSync() {
 	u.errSync = true
 }
 
-// ErrResetDatabase sets to true the property errResetDatabase
+// ErrSyncResetDatabase sets to true the property errResetDatabase
 func (u *UpMetricsMetadata) ErrSyncResetDatabase() {
 	u.errSyncResetDatabase = true
 }
 
-// ErrResetDatabase sets to true the property errResetDatabase
+// ErrSyncInsufficientSpace sets to true the property errResetDatabase
 func (u *UpMetricsMetadata) ErrSyncInsufficientSpace() {
 	u.errSyncInsufficientSpace = true
 }
 
-// ErrResetDatabase sets to true the property errResetDatabase
+// ErrSyncLostSyncthing sets to true the property errResetDatabase
 func (u *UpMetricsMetadata) ErrSyncLostSyncthing() {
 	u.errSyncLostSyncthing = true
 }
@@ -194,6 +192,6 @@ func (u *UpMetricsMetadata) ExecDuration(duration time.Duration) {
 }
 
 // TrackUp sends a tracking event to mixpanel when the user activates a development container
-func (a *AnalyticsTracker) TrackUp(m *UpMetricsMetadata) {
+func (a *Tracker) TrackUp(m *UpMetricsMetadata) {
 	a.trackFn(upEvent, m.success, m.toProps())
 }

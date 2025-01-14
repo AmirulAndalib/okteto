@@ -76,18 +76,18 @@ type Namespaces struct {
 }
 
 type Options struct {
-	Namespace   string
 	List        metav1.ListOptions
+	Namespace   string
 	Parallelism int64
 }
 
 type Trip struct {
-	namespace  string
-	list       metav1.ListOptions
-	restConfig *rest.Config
 	k8s        kubernetes.Interface
 	dynamic    dynamic.Interface
+	restConfig *rest.Config
 	sem        *semaphore.Weighted
+	list       metav1.ListOptions
+	namespace  string
 	writeLock  sync.Mutex
 }
 
@@ -117,7 +117,7 @@ func (n *Namespaces) DestroyWithLabel(ctx context.Context, ns string, opts Delet
 		LabelSelector: opts.LabelSelector,
 	}
 
-	trip, err := NewTrip(n.restConfig, &Options{
+	trip, err := newTrip(n.restConfig, &Options{
 		Namespace:   ns,
 		Parallelism: parallelism,
 		List:        listOptions,
@@ -141,7 +141,7 @@ func (n *Namespaces) DestroyWithLabel(ctx context.Context, ns string, opts Delet
 		logrus.SetLevel(prevLevel)
 	}()
 
-	return trip.Wander(ctx, TravelerFunc(func(obj runtime.Object) error {
+	return trip.wander(ctx, TravelerFunc(func(obj runtime.Object) error {
 		m, err := meta.Accessor(obj)
 		if err != nil {
 			return err
@@ -195,7 +195,7 @@ func (n *Namespaces) DestroySFSVolumes(ctx context.Context, ns string, opts Dele
 
 	ssList, err := statefulsets.List(ctx, ns, opts.LabelSelector, n.k8sClient)
 	if err != nil {
-		return fmt.Errorf("error getting statefulsets: %s", err)
+		return fmt.Errorf("error getting statefulsets: %w", err)
 	}
 	for _, ss := range ssList {
 		for _, pvcTemplate := range ss.Spec.VolumeClaimTemplates {
@@ -220,7 +220,7 @@ func (n *Namespaces) DestroySFSVolumes(ctx context.Context, ns string, opts Dele
 	deployedByNotExistSelector := labels.NewSelector().Add(*deployedByNotExist).String()
 	vList, err := volumes.List(ctx, ns, deployedByNotExistSelector, n.k8sClient)
 	if err != nil {
-		return fmt.Errorf("error getting volumes: %s", err)
+		return fmt.Errorf("error getting volumes: %w", err)
 	}
 	for _, v := range vList {
 		if v.Annotations[resourcePolicyAnnotation] == keepPolicy {
@@ -241,7 +241,7 @@ func (n *Namespaces) DestroySFSVolumes(ctx context.Context, ns string, opts Dele
 }
 
 // Below functions were added to remove "github.com/ibuildthecloud/finalizers" as a dependency
-func NewTrip(restConfig *rest.Config, opts *Options) (*Trip, error) {
+func newTrip(restConfig *rest.Config, opts *Options) (*Trip, error) {
 	if opts == nil {
 		opts = &Options{}
 	}
@@ -260,11 +260,13 @@ func NewTrip(restConfig *rest.Config, opts *Options) (*Trip, error) {
 		return nil, err
 	}
 
+	defaultMaxWeight := int64(10)
+
 	var sem *semaphore.Weighted
 	if opts.Parallelism > 0 {
 		sem = semaphore.NewWeighted(opts.Parallelism)
 	} else {
-		sem = semaphore.NewWeighted(10)
+		sem = semaphore.NewWeighted(defaultMaxWeight)
 	}
 
 	return &Trip{
@@ -277,7 +279,7 @@ func NewTrip(restConfig *rest.Config, opts *Options) (*Trip, error) {
 	}, nil
 }
 
-func (t *Trip) Wander(ctx context.Context, traveler Traveler) error {
+func (t *Trip) wander(ctx context.Context, traveler Traveler) error {
 	_, apis, err := t.k8s.Discovery().ServerGroupsAndResources()
 	if err != nil {
 		return err

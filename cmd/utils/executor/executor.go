@@ -18,8 +18,8 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/okteto/okteto/cmd/utils"
 	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/env"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model"
 )
@@ -32,10 +32,10 @@ type ManifestExecutor interface {
 
 // Executor implements ManifestExecutor with a executor displayer
 type Executor struct {
-	outputMode     string
 	displayer      executorDisplayer
-	runWithoutBash bool
+	outputMode     string
 	shell, dir     string
+	runWithoutBash bool
 }
 
 type executorDisplayer interface {
@@ -60,7 +60,7 @@ func NewExecutor(output string, runWithoutBash bool, dir string) *Executor {
 	}
 
 	shell := "bash"
-	if utils.LoadBoolean(constants.OktetoDeployRemote) {
+	if env.LoadBoolean(constants.OktetoDeployRemote) {
 		shell = "sh"
 	}
 

@@ -35,9 +35,9 @@ func TestAuth(t *testing.T) {
 		err  error
 	}
 	tests := []struct {
-		name     string
-		input    input
 		expected expected
+		input    input
+		name     string
 	}{
 		{
 			name: "error authenticating",
@@ -117,7 +117,7 @@ func TestAuth(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := OktetoClient{
+			c := Client{
 				client: tt.input.client,
 			}
 			u, err := c.Auth(context.Background(), "")
@@ -136,9 +136,9 @@ func TestAuthGQLCall(t *testing.T) {
 		err  error
 	}
 	tests := []struct {
-		name     string
 		input    input
 		expected expected
+		name     string
 	}{
 		{
 			name: "error",
@@ -193,84 +193,10 @@ func TestAuthGQLCall(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := OktetoClient{
+			c := Client{
 				client: tt.input.client,
 			}
 			u, err := c.authUser(context.Background(), "")
-			assert.ErrorIs(t, err, tt.expected.err)
-			assert.Equal(t, tt.expected.user, u)
-		})
-	}
-}
-
-func TestDeprecatedAuth(t *testing.T) {
-	type input struct {
-		client fakeGraphQLClient
-	}
-	type expected struct {
-		user *types.User
-		err  error
-	}
-	tests := []struct {
-		name     string
-		input    input
-		expected expected
-	}{
-		{
-			name: "error",
-			input: input{
-				client: fakeGraphQLClient{
-					err: assert.AnError,
-				},
-			},
-			expected: expected{
-				err: assert.AnError,
-			},
-		},
-		{
-			name: "return user",
-			input: input{
-				client: fakeGraphQLClient{
-					mutationResult: &deprecatedAuthMutationStruct{
-						Response: deprecatedUserMutation{
-							Id:          "test",
-							Name:        "test",
-							Namespace:   "test",
-							Email:       "test",
-							ExternalID:  "test",
-							Token:       "test",
-							New:         true,
-							Registry:    "test",
-							Buildkit:    "test",
-							Certificate: "test",
-						},
-					},
-				},
-			},
-			expected: expected{
-				user: &types.User{
-					Name:            "test",
-					Namespace:       "test",
-					Email:           "test",
-					ExternalID:      "test",
-					Token:           "test",
-					New:             true,
-					Registry:        "test",
-					Buildkit:        "test",
-					Certificate:     "test",
-					ID:              "test",
-					GlobalNamespace: constants.DefaultGlobalNamespace,
-					Analytics:       true,
-				},
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := OktetoClient{
-				client: tt.input.client,
-			}
-			u, err := c.deprecatedAuthUser(context.Background(), "")
 			assert.ErrorIs(t, err, tt.expected.err)
 			assert.Equal(t, tt.expected.user, u)
 		})
